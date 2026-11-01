@@ -23,7 +23,7 @@ object Prefs {
     const val MODE_SHIZUKU = "shizuku"
 
     fun getMode(context: Context): String =
-        sp(context).getString(KEY_MODE, MODE_DIRECT) ?: MODE_DIRECT
+        sp(context).getString(KEY_MODE, MODE_SHIZUKU) ?: MODE_SHIZUKU
 
     fun setMode(context: Context, mode: String) {
         val valid = if (mode == MODE_DIRECT || mode == MODE_SHIZUKU) true else false

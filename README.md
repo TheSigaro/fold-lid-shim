@@ -49,6 +49,50 @@ adb logcat -s FoldLidShim
 
 run-as требует debuggable APK, например assembleDebug.
 
+## Запись датчиков
+
+Нажмите «Запись датчиков», затем сверните приложение и несколько раз закройте и раскройте
+телефон. Кнопка «Метка» добавляет якорь в запись. Кнопка «Стоп, осталось N с» останавливает
+запись вручную; автоматически она заканчивается через 90 секунд или при достижении 30 МБ.
+После остановки под кнопками показаны размер файла, число и типы зарегистрированных датчиков,
+а также ошибки регистрации. Новый старт заменяет предыдущий `files/sensors.csv`.
+
+Запись использует отдельную foreground-службу и временный partial wake lock, чтобы непрерывные
+датчики работали после ухода из UI. Она не включает службу складывания и не запускает Shizuku.
+Все слушатели записи, поток, wake lock и её служба освобождаются при остановке. При убийстве
+процесса запись не возобновляется, последние буферизованные строки могут потеряться.
+
+Для debug APK заберите файл и запустите анализ на компьютере с Python 3.10+:
+
+```sh
+adb shell run-as dev.pavlov.foldlidshim cat files/sensors.csv > sensors.csv
+python3 tools/sensors_report.py sensors.csv
+python3 tools/sensors_report.py sensors.csv --anchor-threshold 6 --window-ms 1000 --step-ms 50
+```
+
+Формат UTF-8 CSV с разделителем `;` и десятичной точкой:
+`elapsedNs;timestampNs;type;name;v0;v1;v2;...`. Сохраняются все значения, включая поправки
+некалиброванных датчиков. Текстовые поля с разделителем, кавычкой или переводом строки
+экранируются по правилам CSV. Первая строка: `elapsedNs;0;header;<unix-ms старта>;<Build.MODEL>`.
+Состояния и метки: `elapsedNs;0;state;<committed state>` и `elapsedNs;0;mark;<текст>`.
+
+Скрипт показывает число событий и средний период каждого датчика, изменения hinge_angle,
+состояния, метки и всплески ускорения. Время датчиков берётся из `SensorEvent.timestamp`,
+время состояний и меток - из `elapsedRealtimeNanos` при получении. Ноль относительного времени
+соответствует заголовку. Окно вокруг якоря содержит последние отсчёты не позже каждой точки;
+`n/a` означает отсутствие предыдущего отсчёта. Модули векторов используют первые три значения.
+Магнитное поле измеряется в мкТл, ускорение в м/с², гироскоп в рад/с; скалярные значения
+сохраняют единицы датчика. Статистика магнитометра включает модуль и оси x/y/z.
+
+Отбирается один экземпляр каждого типа без requiredPermission, только continuous и on-change,
+с предпочтением первого non-wake-up. По известному списку Fold7 ожидается 21 тип:
+accelerometer (1), gyroscope (4), accelerometer_uncalibrated (35), gyroscope_uncalibrated (16),
+magnetic_field (2), magnetic_field_uncalibrated (14), gravity (9), linear_acceleration (10),
+rotation_vector (11), game_rotation_vector (15), orientation (3), pressure (6), light_ir,
+light_cct, hinge_angle (36), light (5), proximity (8), device_orientation (27), interrupt_gyro,
+device_common_info и Motion Sensor (65559). Числовые типы vendor-датчиков видны в UI и файле.
+Фактическая регистрация зависит от SensorManager; датчики с SSENSOR не запрашиваются.
+
 ## Расход ресурсов
 
 В direct нет ShizukuAutoStarter, сетевого callback автозапуска, его executor, reconcileTick и периодического чтения состояния. При переходе из Shizuku в direct прежнее соединение освобождается, поздний binder callback не биндит заново. ShizukuAutoStarter, adb, BinderNudgeActivity и ReconcilePolicy не изменены. Процесс :nudge по-прежнему используется только существующим автозапуском.

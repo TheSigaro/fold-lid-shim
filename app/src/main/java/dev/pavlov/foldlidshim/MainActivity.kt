@@ -39,6 +39,7 @@ class MainActivity : androidx.appcompat.app.AppCompatActivity() {
     private lateinit var tvDsmStatus: TextView
     private lateinit var tvStatus: TextView
 
+    private lateinit var recordingControls: SensorRecordingControls
     private var resumed = false
     private var debugSensors: AngleSensors? = null
 
@@ -123,6 +124,8 @@ class MainActivity : androidx.appcompat.app.AppCompatActivity() {
                     .setMessage(Timeline.read().takeLast(24_000)).setPositiveButton(android.R.string.ok, null).show()
             }
         })
+
+        recordingControls = SensorRecordingControls(this, controls)
 
         // Restore mode selection
         val mode = Prefs.getMode(this)
@@ -229,6 +232,7 @@ class MainActivity : androidx.appcompat.app.AppCompatActivity() {
 
     override fun onStart() {
         super.onStart()
+        recordingControls.start()
         ShimState.addListener(bridgeListener)
         if (Prefs.getMode(this) == Prefs.MODE_SHIZUKU) ShizukuBridge.addListener(bridgeListener)
         if (Prefs.getMode(this) == Prefs.MODE_DIRECT) {
@@ -254,6 +258,7 @@ class MainActivity : androidx.appcompat.app.AppCompatActivity() {
     }
 
     override fun onStop() {
+        recordingControls.stop()
         debugSensors?.stop()
         debugSensors = null
         main.removeCallbacks(tick)

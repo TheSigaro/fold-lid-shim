@@ -8,6 +8,14 @@ import java.util.concurrent.CopyOnWriteArrayList
 object ShimState {
     @Volatile var serviceRunning = false
     @Volatile var directCurrentState: Int? = null
+        set(value) {
+            val previous = field
+            field = value
+            if (previous != value) stateListeners.forEach { it(value) }
+        }
+    private val stateListeners = CopyOnWriteArrayList<(Int?) -> Unit>()
+    fun addStateListener(listener: (Int?) -> Unit) { stateListeners.add(listener) }
+    fun removeStateListener(listener: (Int?) -> Unit) { stateListeners.remove(listener) }
     /** Current-state sample received while no direct request belonged to us. */
     @Volatile var directUnrequestedState: Int? = null
     @Volatile var directConfirmationPending = false

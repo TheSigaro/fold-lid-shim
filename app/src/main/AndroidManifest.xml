@@ -83,6 +83,12 @@
                 android:resource="@xml/fold_confirm_accessibility" />
         </service>
 
+        <service android:name=".SensorRecordingService" android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="User-started sensor recording limited to 90 seconds or 30 MB" />
+        </service>
+
         <service
             android:name=".FoldService"
             android:exported="false"

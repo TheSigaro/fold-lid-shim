@@ -34,8 +34,8 @@
 
     <string name="switch_service">Служба включена</string>
 
-    <string name="hint_close_deg">Закрыто при угле не более (градусы)</string>
-    <string name="hint_open_deg">Открыто при угле не менее (градусы)</string>
+    <string name="hint_close_deg">Закрыто при угле не более (градусы, по умолчанию 10, без выдержки)</string>
+    <string name="hint_open_deg">Открыто при угле не менее (градусы, по умолчанию 15)</string>
     <string name="btn_save_thresholds">Сохранить пороги</string>
     <string name="thresholds_saved">Пороги сохранены</string>
     <string name="thresholds_invalid">Нужно: 0 &lt;= закрыто &lt; открыто &lt;= 180</string>

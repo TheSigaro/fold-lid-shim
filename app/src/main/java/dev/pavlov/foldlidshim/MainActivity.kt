@@ -13,6 +13,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import android.provider.Settings
 import android.view.View
 import android.view.WindowInsets
@@ -150,21 +151,6 @@ class MainActivity : Activity() {
         // Unsubscribe from old mode
         if (oldMode == Prefs.MODE_SHIZUKU) {
             ShizukuBridge.removeListener(bridgeListener)
-        } else if (oldMode == Prefs.MODE_DIRECT) {
-            DirectStateController.tryRegisterCallback(this)
-        }
-
-        // Cancel any pending override when switching away from direct mode
-        if (newMode != Prefs.MODE_DIRECT && ShimState.overrideClosed) {
-            val t = Thread {
-                val ok = DirectStateController.cancel(this)
-                if (ok) {
-                    ShimState.overrideClosed = false
-                    ShimState.changed()
-                }
-            }
-            t.start()
-            t.join(4000)
         }
 
         // Subscribe to new mode
@@ -175,6 +161,7 @@ class MainActivity : Activity() {
             Log.i(Config.TAG, "Switched to direct mode, Shizuku not needed")
         }
 
+        if (isServiceRunning()) FoldService.reload(this)
         refresh()
     }
 
@@ -346,6 +333,7 @@ class MainActivity : Activity() {
             if (ok) R.string.thresholds_saved else R.string.thresholds_invalid,
             Toast.LENGTH_SHORT
         ).show()
+        if (ok && isServiceRunning()) FoldService.reload(this)
     }
 
     private fun runTest() {

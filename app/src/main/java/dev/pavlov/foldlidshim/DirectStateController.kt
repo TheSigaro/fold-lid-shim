@@ -6,16 +6,20 @@ import android.os.Looper
 import android.util.Log
 import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Proxy
-import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.Executors
 
 /**
  * Accesses android.hardware.devicestate.DeviceStateManager via reflection.
  * All public methods are safe to call from any thread; they catch and log exceptions.
  */
 object DirectStateController {
+    // One executor for the process, including requests made by the UI test.
+    private val callbackExecutor = Executors.newSingleThreadExecutor()
+    private var generation = 0L
+    @Volatile var hasRequest = false
+        private set
+
     private const val DEVICE_STATE_SERVICE = "device_state"
     private const val MANAGER_CLASS_NAME = "android.hardware.devicestate.DeviceStateManager"
     private const val REQUEST_CLASS_NAME = "android.hardware.devicestate.DeviceStateRequest"
@@ -38,7 +42,6 @@ object DirectStateController {
     fun available(context: Context): Boolean {
         return try {
             initOnce(context)
-            true
         } catch (e: Exception) {
             Log.w(Config.TAG, "DeviceStateManager unavailable: ${e.message}")
             false
@@ -49,7 +52,9 @@ object DirectStateController {
      * Request the device state to be set to CLOSED (folded).
      * Returns true if the request was accepted, false otherwise.
      */
+    @Synchronized
     fun requestClosed(context: Context): Boolean {
+        ShimState.lastCallbackResult = "request failed"
         Log.i(Config.TAG, "DirectStateController.requestClosed: starting")
         return try {
             ensureInitialized(context)
@@ -63,35 +68,25 @@ object DirectStateController {
                     Log.w(Config.TAG, "requestClosed: could not build DeviceStateRequest")
                     false
                 } else {
-                    val latch = CountDownLatch(1)
-                    val activated = AtomicBoolean(false)
-                    val callbackProxy = createCallbackProxy(latch, activated)
-
-                    val executor = handlerExecutor(Looper.getMainLooper())
-
-                    managerClassRef!!.getMethod(
-                        "requestState",
-                        requestClass!!,
-                        Executor::class.java,
-                        callbackInterface!!
-                    ).invoke(manager, request, executor, callbackProxy)
-
-                    // Wait for callback or timeout
-                    val completed = latch.await(1, TimeUnit.SECONDS)
-                    if (completed && activated.get()) {
-                        Log.i(Config.TAG, "requestClosed: onRequestActivated received")
-                        ShimState.overrideClosed = true
-                        ShimState.lastCallbackResult = "activated"
-                        true
-                    } else if (!completed) {
-                        Log.w(Config.TAG, "requestClosed: callback timeout after 1s, assuming success (no exception)")
-                        ShimState.overrideClosed = true
-                        ShimState.lastCallbackResult = "activated"
-                        true
-                    } else {
-                        Log.w(Config.TAG, "requestClosed: callback returned false")
-                        false
+                    val requestGeneration = ++generation
+                    val callbackProxy = createCallbackProxy(requestGeneration)
+                    hasRequest = true
+                    ShimState.lastCallbackResult = "request accepted, waiting for activation"
+                    try {
+                        managerClassRef!!.getMethod(
+                            "requestState",
+                            requestClassRef!!,
+                            Executor::class.java,
+                            callbackInterfaceRef!!
+                        ).invoke(manager, request, callbackExecutor, callbackProxy)
+                    } catch (e: Exception) {
+                        hasRequest = false
+                        ++generation
+                        throw e
                     }
+                    Log.i(Config.TAG, "requestClosed: request accepted (callback pending)")
+                    ShimState.changed()
+                    true
                 }
             }
         } catch (e: SecurityException) {
@@ -118,7 +113,9 @@ object DirectStateController {
     /**
      * Cancel the current state request. Returns true if successful.
      */
+    @Synchronized
     fun cancel(context: Context): Boolean {
+        ShimState.lastCallbackResult = "cancel failed"
         Log.i(Config.TAG, "DirectStateController.cancel: starting")
         return try {
             ensureInitialized(context)
@@ -128,8 +125,11 @@ object DirectStateController {
                 false
             } else {
                 managerClassRef!!.getMethod("cancelStateRequest").invoke(manager)
+                ++generation
+                hasRequest = false
                 ShimState.overrideClosed = false
                 ShimState.lastCallbackResult = "canceled"
+                ShimState.changed()
                 Log.i(Config.TAG, "cancel: success")
                 true
             }
@@ -159,7 +159,7 @@ object DirectStateController {
 
     private fun ensureInitialized(context: Context) {
         if (initialized) return
-        initOnce(context)
+        check(initOnce(context)) { initCause ?: "DeviceStateManager unavailable" }
     }
 
     private fun initOnce(context: Context): Boolean {
@@ -268,35 +268,34 @@ object DirectStateController {
      * Correctly handles Object methods (hashCode, equals, toString).
      * Updates ShimState immediately on callback events.
      */
-    private fun createCallbackProxy(latch: CountDownLatch, activated: AtomicBoolean): Any {
+    private fun createCallbackProxy(requestGeneration: Long): Any {
         val handler = object : java.lang.reflect.InvocationHandler {
             override fun invoke(proxy: Any, method: java.lang.reflect.Method, args: Array<out Any>?): Any? {
-                val name = method.name
-                // Handle Object methods correctly to avoid reflection errors
-                when (name) {
-                    "onRequestActivated" -> {
-                        Log.i(Config.TAG, "Callback.onRequestActivated called")
-                        activated.set(true)
-                        ShimState.overrideClosed = true
-                        ShimState.lastCallbackResult = "activated"
-                        latch.countDown()
+                when (method.name) {
+                    "hashCode" -> return System.identityHashCode(proxy)
+                    "equals" -> return proxy === args?.getOrNull(0)
+                    "toString" -> return "${proxy.javaClass.name}@${System.identityHashCode(proxy)}"
+                }
+                synchronized(this@DirectStateController) {
+                    if (requestGeneration != generation) return null
+                    when (method.name) {
+                        "onRequestActivated" -> {
+                            ShimState.overrideClosed = true
+                            ShimState.lastCallbackResult = "activated"
+                        }
+                        "onRequestSuspended" -> {
+                            ShimState.overrideClosed = false
+                            ShimState.lastCallbackResult = "suspended"
+                        }
+                        "onRequestCanceled" -> {
+                            hasRequest = false
+                            ShimState.overrideClosed = false
+                            ShimState.lastCallbackResult = "canceled"
+                        }
+                        else -> return null
                     }
-                    "onRequestSuspended" -> {
-                        Log.w(Config.TAG, "Callback.onRequestSuspended called")
-                        activated.set(false)
-                        ShimState.lastCallbackResult = "suspended"
-                        latch.countDown()
-                    }
-                    "onRequestCanceled" -> {
-                        Log.w(Config.TAG, "Callback.onRequestCanceled called")
-                        activated.set(false)
-                        ShimState.overrideClosed = false
-                        ShimState.lastCallbackResult = "canceled"
-                        latch.countDown()
-                    }
-                    "hashCode" -> return method.invoke(proxy) as Int
-                    "equals" -> return method.invoke(proxy, *(args ?: emptyArray())) as Boolean
-                    "toString" -> return method.invoke(proxy) as String
+                    Log.i(Config.TAG, "DeviceStateRequest.Callback.${method.name}")
+                    ShimState.changed()
                 }
                 return null
             }
@@ -336,6 +335,11 @@ object DirectStateController {
     private fun createStateCallbackProxy(): Any {
         val handler = object : java.lang.reflect.InvocationHandler {
             override fun invoke(proxy: Any, method: java.lang.reflect.Method, args: Array<out Any>?): Any? {
+                when (method.name) {
+                    "hashCode" -> return System.identityHashCode(proxy)
+                    "equals" -> return proxy === args?.getOrNull(0)
+                    "toString" -> return proxy.javaClass.name
+                }
                 Log.i(Config.TAG, "DeviceStateCallback.${method.name} called")
                 return null
             }

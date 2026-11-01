@@ -62,7 +62,8 @@
         <activity
             android:name=".StateActivity"
             android:exported="false"
-            android:launchMode="singleInstance"
+            android:launchMode="singleTop"
+            android:taskAffinity="${applicationId}"
             android:showWhenLocked="true"
             android:turnScreenOn="true"
             android:excludeFromRecents="true"

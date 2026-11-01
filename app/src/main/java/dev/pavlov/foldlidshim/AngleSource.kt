@@ -71,6 +71,10 @@ class AngleSensors(
     private val onAngle: (String, Float) -> Unit = { _, _ -> }
 ) : SensorEventListener {
     data class Reading(val values: List<Float>, val timestampNs: Long)
+    var receivedNs: Long = 0L
+        private set
+    var timestampNs: Long = 0L
+        private set
     val sources: List<AngleSource>
     private val readings = mutableMapOf<Sensor, Reading>()
     private val registered = mutableSetOf<Sensor>()
@@ -108,7 +112,9 @@ class AngleSensors(
 
     override fun onSensorChanged(event: SensorEvent) {
         if (event.sensor !in registered) return
-        readings[event.sensor] = Reading(event.values.toList(), event.timestamp)
+        receivedNs = android.os.SystemClock.elapsedRealtimeNanos()
+        timestampNs = event.timestamp
+        if (sources.size > 1) readings[event.sensor] = Reading(event.values.toList(), event.timestamp)
         for (source in sources) source.onEvent(event)?.let { onAngle(source.id, it) }
     }
 

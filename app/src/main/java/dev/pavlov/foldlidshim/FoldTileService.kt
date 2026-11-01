@@ -19,7 +19,7 @@ class FoldTileService : TileService() {
     override fun onStartListening() {
         super.onStartListening()
         listening = true
-        ShizukuBridge.addListener(changed)
+        if (Prefs.getMode(this) == Prefs.MODE_SHIZUKU) ShizukuBridge.addListener(changed)
         ShimState.addListener(changed)
         if (Prefs.getMode(this) == Prefs.MODE_DIRECT) {
             DirectStateController.tryRegisterCallback(applicationContext)
@@ -63,12 +63,12 @@ class FoldTileService : TileService() {
             val id = UUID.randomUUID().toString()
             StateActivity.registerAction(id)
             val intent = Intent(this, StateActivity::class.java).apply {
-                putExtra(StateActivity.EXTRA_ACTION, if (ShimState.directCurrentState == 0 ||
-                    DirectStateController.hasClosedRequest) StateActivity.ACTION_OPEN else StateActivity.ACTION_CLOSED)
+                putExtra(StateActivity.EXTRA_ACTION, StateActivity.ACTION_OPEN)
                 putExtra(StateActivity.EXTRA_ID, id)
                 putExtra(StateActivity.EXTRA_DEADLINE, SystemClock.elapsedRealtime() + 3000L)
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_ANIMATION)
             }
+            Timeline.event("startActivity tile CANCEL id=$id")
             startActivityAndCollapse(PendingIntent.getActivity(this, 0, intent,
                 PendingIntent.FLAG_CANCEL_CURRENT or PendingIntent.FLAG_IMMUTABLE))
             return

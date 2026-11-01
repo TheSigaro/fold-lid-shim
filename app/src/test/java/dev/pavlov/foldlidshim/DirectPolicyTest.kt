@@ -29,8 +29,8 @@ class DirectPolicyTest {
             assertEquals(Command.NONE, DirectPolicy.decide(false, state, false))
     }
 
-    @Test fun openingRequestsOpenedForStuckClosedOrOtherStates() {
+    @Test fun openingNeverContestsForeignOverrides() {
         for (state in listOf(null, 0, 1, 4, 5))
-            assertEquals(Command.OPENED, DirectPolicy.decide(false, state, false))
+            assertEquals(Command.NONE, DirectPolicy.decide(false, state, false))
     }
 }

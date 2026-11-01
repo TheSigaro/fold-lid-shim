@@ -39,11 +39,12 @@ class StateActivity : Activity() {
             val id = UUID.randomUUID().toString()
             registerAction(id)
             try {
+                Timeline.event("startActivity manual closed=$closed id=$id")
                 context.startActivity(Intent(context, StateActivity::class.java).apply {
                     putExtra(EXTRA_ACTION, if (closed) ACTION_CLOSED else ACTION_OPEN)
                     putExtra(EXTRA_ID, id)
                     putExtra(EXTRA_DEADLINE, SystemClock.elapsedRealtime() + FOCUS_TIMEOUT_MS)
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_ANIMATION)
                 })
             } catch (e: Exception) {
                 abandonAction(id)
@@ -56,18 +57,27 @@ class StateActivity : Activity() {
         const val ACTION_CLOSED = "closed"
         const val ACTION_OPEN = "open"
         private const val FOCUS_TIMEOUT_MS = 3000L
-        private const val FINISH_DELAY_MS = 300L
+        const val OPEN_UNAVAILABLE = "Система не даёт приложению запросить открытие. При залипании «закрыто» нужен Shizuku"
     }
 
     private val handler = Handler(Looper.getMainLooper())
     private val executed = AtomicBoolean(false)
+    private var resumed = false
     private var reported = false
+    private var accepted = false
+    private var actionError: String? = null
+    private val stateChanged = Runnable {
+        if (executed.get() && !ShimState.directConfirmationPending) finish()
+    }
     private var receiver: ResultReceiver? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        setShowWhenLocked(true)
+        setTurnScreenOn(true)
+        ShimState.addListener(stateChanged)
         receiver = intent.getParcelableExtra(EXTRA_RECEIVER, ResultReceiver::class.java)
-        Log.i(Config.TAG, "StateActivity.onCreate: action=${intent?.getStringExtra(EXTRA_ACTION)}")
+        Timeline.event("StateActivity.onCreate action=${intent?.getStringExtra(EXTRA_ACTION)}")
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -77,14 +87,27 @@ class StateActivity : Activity() {
         setIntent(intent)
         receiver = intent.getParcelableExtra(EXTRA_RECEIVER, ResultReceiver::class.java)
         reported = false
+        accepted = false
+        actionError = null
         executed.set(false)
         handler.postDelayed(focusTimeoutRunnable, FOCUS_TIMEOUT_MS)
         if (hasWindowFocus()) onWindowFocusChanged(true)
     }
 
+    override fun onResume() {
+        super.onResume()
+        resumed = true
+        if (hasWindowFocus()) onWindowFocusChanged(true)
+    }
+
+    override fun onPause() {
+        resumed = false
+        super.onPause()
+    }
+
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (!hasFocus) return
+        if (!hasFocus || !resumed) return
         // One-shot guard: execute only once even if focus changes multiple times
         if (!executed.compareAndSet(false, true)) {
             Log.i(Config.TAG, "StateActivity: already executed, ignoring duplicate focus")
@@ -92,7 +115,7 @@ class StateActivity : Activity() {
         }
 
         handler.removeCallbacks(focusTimeoutRunnable)
-        Log.i(Config.TAG, "StateActivity: window gained focus, executing request")
+        Timeline.event("StateActivity focus")
         val action = intent?.getStringExtra(EXTRA_ACTION) ?: ACTION_CLOSED
         executeAndFinish(action)
     }
@@ -110,7 +133,10 @@ class StateActivity : Activity() {
                     activeId = null
                     success = when (action) {
                         ACTION_CLOSED -> DirectStateController.applyDesired(this, true)
-                        ACTION_OPEN -> DirectStateController.applyDesired(this, false)
+                        ACTION_OPEN -> {
+                            if (receiver == null) DirectStateController.manualOpen()
+                            DirectStateController.cancel(this)
+                        }
                         else -> false
                     }
                     if (!success) error = ShimState.lastCallbackResult ?: "direct action failed"
@@ -120,15 +146,16 @@ class StateActivity : Activity() {
             Log.e(Config.TAG, "StateActivity: request failed", e)
             error = e.message ?: e.javaClass.simpleName
         }
-        report(success, error)
-
-        // Finish after a short delay to ensure the system processes the state change
-        handler.postDelayed(object : Runnable {
-            override fun run() {
-                if (ShimState.directConfirmationPending) handler.postDelayed(this, 50L)
-                else finish()
-            }
-        }, FINISH_DELAY_MS)
+        accepted = success
+        actionError = error
+        if (error != null) Timeline.event("request exception $error")
+        if (action == ACTION_OPEN && ShimState.directCurrentState == 0) {
+            ShimState.lastCallbackResult = OPEN_UNAVAILABLE
+            ShimState.changed()
+        }
+        // Result is sent by onDestroy, after relinquishing this foreground window.
+        // Keep the foreground context for confirmation; callback ends it without polling.
+        if (!success || !ShimState.directConfirmationPending) finish()
     }
 
     /**
@@ -142,7 +169,8 @@ class StateActivity : Activity() {
 
     override fun onDestroy() {
         handler.removeCallbacksAndMessages(null)
-        report(false, "activity finished before action completed")
+        ShimState.removeListener(stateChanged)
+        report(accepted, actionError ?: if (accepted) null else "activity finished before action completed")
         super.onDestroy()
     }
 
@@ -150,6 +178,7 @@ class StateActivity : Activity() {
         if (reported) return
         reported = true
         val id = intent.getStringExtra(EXTRA_ID)
+        Timeline.event("StateActivity result id=$id accepted=$success error=$error")
         if (id != null) abandonAction(id)
         receiver?.send(0, Bundle().apply {
             putString(EXTRA_ID, id)

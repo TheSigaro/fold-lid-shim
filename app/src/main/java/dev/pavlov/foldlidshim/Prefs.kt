@@ -19,6 +19,29 @@ object Prefs {
         sp(context).edit().putBoolean(KEY_ENABLED, value).apply()
     }
 
+    fun earlyEnabled(context: Context): Boolean = sp(context).getBoolean("early_enabled", true)
+    fun earlyAngle(context: Context): Float = sp(context).getFloat("early_angle", 45f)
+        .takeIf { it.isFinite() && it in 15f..90f }?.coerceAtLeast(closeDeg(context)) ?: 45f
+    fun setEarly(context: Context, enabled: Boolean, angle: Float): Boolean {
+        if (!angle.isFinite() || angle !in 15f..90f || angle < closeDeg(context)) return false
+        sp(context).edit().putBoolean("early_enabled", enabled).putFloat("early_angle", angle).apply()
+        return true
+    }
+    fun restartBlocked(context: Context): Boolean = sp(context).getBoolean("restart_blocked", false)
+    fun recordRestart(context: Context, now: Long): Boolean {
+        val previous = sp(context).getString("restarts", "").orEmpty().split(",").mapNotNull { it.toLongOrNull() }
+        val recent = RestartGuard.recent(previous, now)
+        val blocked = recent.size >= 2
+        sp(context).edit().putString("restarts", recent.joinToString(","))
+            .putBoolean("restart_blocked", blocked).apply()
+        if (blocked) setEnabled(context, false)
+        return blocked
+    }
+    fun manualStart(context: Context) {
+        sp(context).edit().remove("restarts").putBoolean("restart_blocked", false).apply()
+        if (ShimState.lastCallbackResult == RestartGuard.MESSAGE) ShimState.lastCallbackResult = null
+    }
+
     const val MODE_DIRECT = "direct"
     const val MODE_SHIZUKU = "shizuku"
 

@@ -7,7 +7,6 @@ import android.util.Log
 import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Proxy
 import java.util.concurrent.Executor
-import java.util.concurrent.Executors
 
 /**
  * Accesses android.hardware.devicestate.DeviceStateManager via reflection.
@@ -15,7 +14,10 @@ import java.util.concurrent.Executors
  */
 object DirectStateController {
     // One executor for the process, including requests made by the UI test.
-    private val callbackExecutor = Executors.newSingleThreadExecutor()
+    private val callbackExecutor = Executor { main.post(it) }
+    @Volatile var manualOpenGeneration = 0L
+        private set
+    fun manualOpen() { manualOpenGeneration++ }
     private var generation = 0L
     private var requestSequence = 0L
     private val main = Handler(Looper.getMainLooper())
@@ -25,7 +27,6 @@ object DirectStateController {
     val hasClosedRequest: Boolean get() = hasRequest && requestedState == 0
 
     fun requestClosed(context: Context): Boolean = requestState(context, 0)
-    fun requestOpen(context: Context): Boolean = requestState(context, 3)
 
     @Synchronized
     fun applyDesired(context: Context, closed: Boolean): Boolean = when (
@@ -33,7 +34,6 @@ object DirectStateController {
     ) {
         DirectPolicy.Command.NONE -> true
         DirectPolicy.Command.CLOSED -> requestClosed(context)
-        DirectPolicy.Command.OPENED -> requestOpen(context)
         DirectPolicy.Command.CANCEL -> cancel(context)
     }
 
@@ -69,13 +69,13 @@ object DirectStateController {
     }
 
     /**
-     * Request CLOSED (0) or OPENED (3) while the requester is the top app.
+     * Request CLOSED (0) while the requester is the top app.
      * Returns true if the request was accepted, false otherwise.
      */
     @Synchronized
     private fun requestState(context: Context, state: Int): Boolean {
         ShimState.lastCallbackResult = "request failed"
-        Log.i(Config.TAG, "DirectStateController.requestState: state=$state starting")
+        Timeline.event("requestState state=$state")
         return try {
             ensureInitialized(context)
             val manager = getManagerInstance(context)
@@ -111,6 +111,7 @@ object DirectStateController {
                     }, 5000L)
                     ShimState.lastCallbackResult = "request accepted, waiting for activation"
                     try {
+                        Timeline.event("requestState send state=$state generation=$requestGeneration flags=0")
                         managerClassRef!!.getMethod(
                             "requestState",
                             requestClassRef!!,
@@ -158,7 +159,7 @@ object DirectStateController {
     @Synchronized
     fun cancel(context: Context): Boolean {
         ShimState.lastCallbackResult = "cancel failed"
-        Log.i(Config.TAG, "DirectStateController.cancel: starting")
+        Timeline.event("cancelStateRequest")
         return try {
             ensureInitialized(context)
             val manager = getManagerInstance(context)
@@ -166,15 +167,15 @@ object DirectStateController {
                 Log.w(Config.TAG, "cancel: could not get DeviceStateManager instance")
                 false
             } else {
+                Timeline.event("cancelStateRequest send generation=$generation")
                 managerClassRef!!.getMethod("cancelStateRequest").invoke(manager)
-                generation = ++requestSequence
+                // Keep ownership until onRequestCanceled confirms removal.
+                // A recovered sticky request has no callback in this process.
                 ShimState.directConfirmationPending = false
-                requestedState = null
-                hasRequest = false
-                ShimState.overrideClosed = false
-                ShimState.lastCallbackResult = "canceled"
+                ShimState.lastCallbackResult = if (hasRequest)
+                    "cancel accepted, waiting for callback" else "cancel accepted"
                 ShimState.changed()
-                Log.i(Config.TAG, "cancel: success")
+                Timeline.event("cancel accepted awaitingCallback=$hasRequest")
                 true
             }
         } catch (e: SecurityException) {
@@ -284,9 +285,8 @@ object DirectStateController {
             val builder = newBuilder.invoke(null, state)
 
             val setFlags = builderClassRef!!.getMethod("setFlags", Int::class.javaPrimitiveType)
-            // Flags: keep override until explicitly cancelled or process dies.
-            // Using value 1 based on AOSP DeviceStateRequest constant.
-            setFlags.invoke(builder, 1)
+            // Samsung setBaseState dereferences null with flag 1 on OPENED. Never use flags 1 or 8.
+            setFlags.invoke(builder, 0)
 
             val build = builderClassRef!!.getMethod("build")
             return build.invoke(builder)
@@ -332,6 +332,7 @@ object DirectStateController {
                             ShimState.lastCallbackResult = "suspended"
                         }
                         "onRequestCanceled" -> {
+                            requestedState = null
                             hasRequest = false
                             ShimState.overrideClosed = false
                             ShimState.lastCallbackResult = "canceled"
@@ -339,7 +340,7 @@ object DirectStateController {
                         else -> return null
                     }
                     ShimState.directConfirmationPending = false
-                    Log.i(Config.TAG, "DeviceStateRequest.Callback.${method.name}")
+                    Timeline.event("request callback ${method.name} generation=$requestGeneration")
                     ShimState.changed()
                 }
                 return null
@@ -400,6 +401,7 @@ object DirectStateController {
                         ShimState.directCurrentState = identifier
                         ShimState.directUnrequestedState = identifier.takeUnless { hasRequest }
                     }
+                    Timeline.event("device state=$identifier")
                     ShimState.changed()
                 }
                 return null

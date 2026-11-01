@@ -150,7 +150,19 @@ object ShizukuBridge {
         return if (granted) ShizukuStatus.READY else ShizukuStatus.NO_PERMISSION
     }
 
+    // Direct mode must not bind, including a late binder-received callback after a mode change.
+    @Volatile private var directMode = false
+    fun setDirectMode(value: Boolean) {
+        directMode = value
+        if (value && (service != null || binding)) {
+            runCatching { Shizuku.unbindUserService(userServiceArgs, connection, true) }
+            service = null
+            binding = false
+        }
+    }
+
     fun ensureBound() {
+        if (directMode) return
         try {
             if (!Shizuku.pingBinder()) return
             if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) return

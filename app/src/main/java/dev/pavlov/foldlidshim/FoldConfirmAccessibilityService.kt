@@ -4,23 +4,22 @@ import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.ComponentName
 import android.content.Context
-import android.os.SystemClock
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityManager
 import android.view.accessibility.AccessibilityNodeInfo
 
 class FoldConfirmAccessibilityService : AccessibilityService() {
-    private var lastClickAt: Long? = null
     private var clickedDialog: Pair<Long, Int>? = null
 
     private fun allowed(): Boolean = ShimState.serviceRunning && Prefs.isEnabled(this) &&
         Prefs.getMode(this) == Prefs.MODE_DIRECT && ShimState.directConfirmationPending
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        if (event?.packageName?.toString() != SYSTEM_UI || !allowed()) return
+        if (!allowed()) return
+        if (event?.packageName?.toString() != SYSTEM_UI) return
         val generation = ShimState.directRequestGeneration
-        val source = event.source ?: windows.firstOrNull { it.id == event.windowId }?.root ?: return
+        val source = event.source ?: rootInActiveWindow ?: return
         // An event source may be a changed child. Ascend to its window root.
         var root = source
         while (true) {
@@ -28,6 +27,14 @@ class FoldConfirmAccessibilityService : AccessibilityService() {
             root = parent
         }
         if (root.packageName?.toString() != SYSTEM_UI) return
+        val title = root.findAccessibilityNodeInfosByViewId("com.android.systemui:id/rear_display_title_text_view")
+            .firstOrNull { it.packageName?.toString() == SYSTEM_UI }
+        val button = if (title != null) root.findAccessibilityNodeInfosByViewId("android:id/button1")
+            .firstOrNull { it.packageName?.toString() == SYSTEM_UI } else null
+        if (button != null) {
+            click(button, generation, root.windowId)
+            return
+        }
         val nodes = mutableListOf<AccessibilityNodeInfo>()
         fun visit(node: AccessibilityNodeInfo) {
             // Never inspect embedded content belonging to a different package.
@@ -48,13 +55,17 @@ class FoldConfirmAccessibilityService : AccessibilityService() {
             })
         }
         val index = ConfirmButtonPicker.pick(descriptions) ?: return
-        val now = SystemClock.elapsedRealtime()
-        val key = generation to root.windowId
-        if (clickedDialog == key || lastClickAt?.let { now - it < 2000 } == true) return
+        click(nodes[index], generation, root.windowId)
+    }
+
+    private fun click(button: AccessibilityNodeInfo, generation: Long, windowId: Int) {
+        val key = generation to windowId
+        if (clickedDialog == key) return
         if (!allowed() || generation != ShimState.directRequestGeneration) return
-        if (nodes[index].performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+        Timeline.event("rear display dialog seen generation=$generation window=$windowId")
+        if (button.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
             clickedDialog = key
-            lastClickAt = now
+            Timeline.event("rear display confirm click generation=$generation")
         }
     }
 

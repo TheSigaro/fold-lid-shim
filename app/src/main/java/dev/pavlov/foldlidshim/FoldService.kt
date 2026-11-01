@@ -76,7 +76,63 @@ class FoldService : Service() {
     // Track pending StateActivity action to handle its result properly
     private var pendingAction: String? = null
     private var pendingId: String? = null
-    private var stopping = false
+    @Volatile private var stopping = false
+    private var directReady = false
+    private var motion = DirectMotion()
+    private var manualOpenGeneration = DirectStateController.manualOpenGeneration
+    private val cancelRetry = CancelRetry()
+    private var stopAfterCancel = false
+    private var reloadAfterCancel = false
+    private var recoveryNeeded = true
+    private var recoveryPending = false
+    private var lastSensorZone: Int? = null
+    private val retryCancel = Runnable { evaluateDirect(); publish(force = true) }
+    private fun evaluateDirect() {
+        if (stopping || !directReady) return
+        val angle = lastAngle ?: return
+        if (manualOpenGeneration != DirectStateController.manualOpenGeneration) {
+            manualOpenGeneration = DirectStateController.manualOpenGeneration
+            motion.failed() // Keep a manual cancellation until the next direction change.
+        }
+        val (_, open) = Prefs.thresholds(this)
+        val opening = stopAfterCancel || reloadAfterCancel || (!motion.closed && angle >= open)
+        // Abandon under the activity gate before reading ownership: an in-flight
+        // binder call must either complete first or never execute.
+        if (opening && pendingAction == StateActivity.ACTION_CLOSED) clearPendingAction()
+        val owns = DirectStateController.hasClosedRequest
+        if (recoveryNeeded && ShimState.directCurrentState != null &&
+            (owns || ShimState.directCurrentState != 0 || angle >= open)) {
+            recoveryNeeded = false
+            recoveryPending = !owns && ShimState.directCurrentState == 0 && angle >= open
+        }
+        if (recoveryPending && ShimState.directCurrentState != 0) {
+            recoveryPending = false
+            if (pendingAction == StateActivity.ACTION_OPEN) clearPendingAction()
+        }
+        val needsCancel = owns || recoveryPending
+        handler.removeCallbacks(retryCancel)
+        if (opening && needsCancel) {
+            if (pendingAction == null && cancelRetry.due(SystemClock.elapsedRealtime(), true, true)) {
+                applyState(false)
+            }
+            handler.postDelayed(retryCancel, 1000L)
+            return
+        }
+        cancelRetry.due(SystemClock.elapsedRealtime(), false, false)
+        if (stopAfterCancel && !needsCancel) { stopSelf(); return }
+        if (reloadAfterCancel && !needsCancel) {
+            reloadAfterCancel = false
+            handleReload()
+            return
+        }
+        if (pendingAction != null || stopAfterCancel || reloadAfterCancel) return
+        if (ShimState.hallDiagnosis == HallDiagnosis.Result.STUCK_CLOSED) {
+            ShimState.lastCallbackResult = StateActivity.OPEN_UNAVAILABLE
+            return
+        }
+        if (motion.closed && !motion.failedClosed) applyState(true)
+    }
+
     private val pendingTimeout = Runnable {
         completeDirectAction(false, "direct action timeout after 3000ms")
     }
@@ -86,6 +142,7 @@ class FoldService : Service() {
                 if (currentMode == Prefs.MODE_DIRECT) {
                     if (!DirectStateController.hasRequest) hall.observe(ShimState.directUnrequestedState)
                     updateHallDiagnosis()
+                    evaluateDirect()
                 }
                 publish(force = true, notifyState = false)
             }
@@ -116,6 +173,7 @@ class FoldService : Service() {
     override fun onCreate() {
         super.onCreate()
         ShimState.serviceRunning = true
+        Timeline.event("service onCreate")
         currentMode = Prefs.getMode(this)
         if (currentMode == Prefs.MODE_DIRECT) DirectStateController.tryRegisterCallback(applicationContext)
         loadThresholds()
@@ -132,12 +190,10 @@ class FoldService : Service() {
         thread = HandlerThread("FoldLidShim-worker").also { it.start() }
         handler = Handler(thread.looper)
         ShimState.addListener(stateListener)
-        val pm = getSystemService(PowerManager::class.java)
-        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "FoldLidShim:event").apply {
-            setReferenceCounted(false)
-        }
+        if (currentMode == Prefs.MODE_SHIZUKU) createWakeLock()
 
         if (currentMode == Prefs.MODE_SHIZUKU) {
+            ShizukuBridge.init()
             ShizukuBridge.addListener(bridgeListener)
             ShizukuBridge.ensureBound()
             ensureAutoStarter()
@@ -147,18 +203,58 @@ class FoldService : Service() {
 
         sensorManager = getSystemService(SensorManager::class.java)
         handler.post {
-            hingeSensors = sensorManager?.let { manager ->
-                AngleSensors(manager, currentInvert, Config.SOURCE_HINGE) { _, angle -> hall.onAngle(angle) }
-                    .also { it.start(handler) }
+            if (currentMode == Prefs.MODE_SHIZUKU || Prefs.angleSource(this) != Config.SOURCE_HINGE) {
+                hingeSensors = sensorManager?.let { manager ->
+                    AngleSensors(manager, currentInvert, Config.SOURCE_HINGE) { _, angle -> hall.onAngle(angle) }
+                        .also { it.start(handler) }
+                }
             }
             registerAngleSource()
-            reconcileTick.run()
+            if (currentMode == Prefs.MODE_SHIZUKU) reconcileTick.run()
         }
         handler.post { publish(force = true) }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_START_SHIZUKU) {
+        if (currentMode == Prefs.MODE_DIRECT) {
+            Timeline.event("service start nullIntent=${intent == null}")
+            if (Prefs.restartBlocked(this) || (intent == null && Prefs.recordRestart(this, System.currentTimeMillis()))) {
+                ShimState.lastCallbackResult = RestartGuard.MESSAGE
+                Timeline.event(RestartGuard.MESSAGE)
+                handler.post {
+                    directReady = true
+                    stopAfterCancel = true
+                    if (lastAngle == null) lastAngle = Prefs.openDeg(this)
+                    evaluateDirect()
+                    if (!DirectStateController.hasRequest && pendingAction == null) stopSelf()
+                }
+                return START_NOT_STICKY
+            }
+            if (!Prefs.isEnabled(this) && intent?.action != ACTION_STOP) {
+                handler.post {
+                    directReady = true
+                    stopAfterCancel = true
+                    if (lastAngle == null) lastAngle = Prefs.openDeg(this)
+                    evaluateDirect()
+                    if (!DirectStateController.hasRequest && pendingAction == null) stopSelf()
+                }
+                return START_NOT_STICKY
+            }
+        }
+        if (currentMode == Prefs.MODE_DIRECT && intent?.action != ACTION_STOP)
+            handler.post { directReady = true; evaluateDirect() }
+        if (intent?.action == ACTION_STOP) {
+            handler.post {
+                directReady = true
+                stopAfterCancel = true
+                clearPendingAction()
+                if (currentMode == Prefs.MODE_DIRECT) {
+                    if (lastAngle == null) lastAngle = Prefs.openDeg(this)
+                    evaluateDirect()
+                } else stopSelf()
+            }
+        }
+        if (intent?.action == ACTION_START_SHIZUKU && currentMode == Prefs.MODE_SHIZUKU) {
             ensureAutoStarter().requestNow()
         }
         if (intent?.action == ACTION_RELOAD) {
@@ -172,12 +268,15 @@ class FoldService : Service() {
         loadThresholds()
         val newMode = Prefs.getMode(this)
         if (newMode != currentMode) {
-            // Invalidate before cancellation. The activity gate waits for an executing action.
+            if (currentMode == Prefs.MODE_DIRECT && DirectStateController.hasRequest) {
+                reloadAfterCancel = true
+                clearPendingAction()
+                evaluateDirect()
+                return
+            }
             clearPendingAction()
             val success = if (currentMode == Prefs.MODE_DIRECT) {
-                if (ShimState.overrideClosed || DirectStateController.hasRequest) {
-                    DirectStateController.cancel(this)
-                } else true
+                true
             } else if (shizukuOverrideActive || ShimState.overrideClosed) {
                 ShizukuBridge.exec(Config.ARG_RESET, 1500)?.code == 0
             } else true
@@ -190,9 +289,20 @@ class FoldService : Service() {
             if (currentMode == Prefs.MODE_SHIZUKU) ShizukuBridge.removeListener(bridgeListener)
             stopAutoStarter()
             currentMode = newMode
-            if (currentMode == Prefs.MODE_DIRECT) DirectStateController.tryRegisterCallback(applicationContext)
+            ShizukuBridge.setDirectMode(currentMode == Prefs.MODE_DIRECT)
+            handler.removeCallbacks(reconcileTick)
+            if (currentMode == Prefs.MODE_SHIZUKU) handler.post(reconcileTick)
+            motion = DirectMotion()
+            directReady = true
+            recoveryNeeded = true
+            if (currentMode == Prefs.MODE_DIRECT) {
+                DirectStateController.tryRegisterCallback(applicationContext)
+                registerAngleSource()
+            }
             decider.reset()
             if (currentMode == Prefs.MODE_SHIZUKU) {
+                if (!::wakeLock.isInitialized) createWakeLock()
+                ShizukuBridge.init()
                 ShizukuBridge.addListener(bridgeListener)
                 ShizukuBridge.ensureBound()
                 ensureAutoStarter()
@@ -215,6 +325,7 @@ class FoldService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        stopping = true
         ShimState.serviceRunning = false
         ShimState.directConfirmationPending = false
         stopAutoStarter()
@@ -227,9 +338,6 @@ class FoldService : Service() {
             cancelHold()
             clearPendingAction()
             var success = true
-            if (currentMode == Prefs.MODE_DIRECT && (ShimState.overrideClosed || DirectStateController.hasRequest)) {
-                success = DirectStateController.cancel(this)
-            }
             if (shizukuOverrideActive) {
                 success = (ShizukuBridge.exec(Config.ARG_RESET, 2000)?.code == 0) && success
             }
@@ -250,10 +358,17 @@ class FoldService : Service() {
         currentSource = Prefs.angleSource(this)
         currentInvert = Prefs.invertAxes(this)
         forceOpened = Prefs.forceOpened(this)
+        if (currentMode == Prefs.MODE_DIRECT) {
+            hingeSensors?.stop()
+            hingeSensors = if (currentSource != Config.SOURCE_HINGE) sensorManager?.let { manager ->
+                AngleSensors(manager, currentInvert, Config.SOURCE_HINGE) { _, angle -> hall.onAngle(angle) }
+                    .also { it.start(handler) }
+            } else null
+        }
         lastAngle = null
         ShimState.angle = null
         startupGate.reset()
-        ShimState.decision = "Ожидание 3 событий"
+        ShimState.decision = if (currentMode == Prefs.MODE_DIRECT) "Ожидание угла" else "Ожидание 3 событий"
         clearPendingAction()
         decider.reset()
         angleSensors = sensorManager?.let { manager ->
@@ -265,10 +380,27 @@ class FoldService : Service() {
     private fun onAngle(angle: Float) {
         if (stopping || !angle.isFinite()) return
         lastAngle = angle
+        if (currentSource == Config.SOURCE_HINGE) hall.onAngle(angle)
         ShimState.angle = angle
         startupGate.onAngle(angle)
-        if (!startupGate.ready) ShimState.decision = "Ожидание 3 событий: ${startupGate.eventCount}/3"
-        else if (ShimState.decision.startsWith("Ожидание")) ShimState.decision = "Между порогами"
+        if (currentMode == Prefs.MODE_DIRECT) {
+            val (close, open) = Prefs.thresholds(this)
+            val before = motion.closed
+            val timestamp = angleSensors?.timestampNs ?: SystemClock.elapsedRealtimeNanos()
+            motion.angle(angle, timestamp, close, open, Prefs.earlyEnabled(this), Prefs.earlyAngle(this))
+            val zone = (if (angle <= close) 1 else 0) or
+                (if (angle >= open) 2 else 0) or
+                (if (angle <= Prefs.earlyAngle(this)) 4 else 0)
+            if (before != motion.closed || zone != lastSensorZone) {
+                Timeline.event("sensor timestampNs=$timestamp receivedNs=${angleSensors?.receivedNs} angle=$angle zone=$zone desiredClosed=${motion.closed}")
+                lastSensorZone = zone
+            }
+            ShimState.decision = if (motion.closed) "CLOSED" else "Снять CLOSED"
+        }
+        if (currentMode == Prefs.MODE_SHIZUKU) {
+            if (!startupGate.ready) ShimState.decision = "Ожидание 3 событий: ${startupGate.eventCount}/3"
+            else if (ShimState.decision.startsWith("Ожидание")) ShimState.decision = "Между порогами"
+        }
         evaluate()
         val now = SystemClock.elapsedRealtime()
         if (now - lastPublishAt >= 200) {
@@ -284,7 +416,9 @@ class FoldService : Service() {
     }
 
     private fun evaluate() {
-        if (stopping || !startupGate.ready) return
+        if (stopping) return
+        if (currentMode == Prefs.MODE_DIRECT) { evaluateDirect(); return }
+        if (!startupGate.ready) return
         if (currentMode == Prefs.MODE_SHIZUKU) {
             val (close, open) = Prefs.thresholds(this)
             ShimState.hallDiagnosis = hall.diagnose(SystemClock.elapsedRealtime(), close, open)
@@ -336,24 +470,36 @@ class FoldService : Service() {
         // A request can have executed just before its activity result times out.
         // hasRequest means accepted (possibly suspended), and still needs cancellation.
         val applied = success || (closed && DirectStateController.hasRequest)
-        decider.onApplied(closed, applied)
+        val wasRecovery = !closed && recoveryPending
+        if (currentMode == Prefs.MODE_DIRECT) {
+            if (closed && !applied && motion.closed) motion.failed()
+            if (!closed && recoveryPending) {
+                recoveryPending = false // A dead owner's request has no callback here; recover once.
+                if (!success) ShimState.lastCallbackResult = "Не удалось снять оставшийся запрос: ${error.orEmpty()}"
+            }
+            Timeline.event("activity result closed=$closed success=$success error=$error")
+        } else decider.onApplied(closed, applied)
         if (!success) {
-            ShimState.lastCallbackResult = error ?: "direct action failed"
+            ShimState.lastCallbackResult = if (wasRecovery)
+                "Не удалось снять оставшийся запрос: ${error ?: "direct action failed"}"
+                else error ?: "direct action failed"
         }
         publish(force = true)
         // Reconcile an angle that crossed the opposite threshold during the activity.
         // Failure waits for a new sensor event instead of retrying in a tight loop.
-        if (applied) evaluate()
+        if (currentMode == Prefs.MODE_DIRECT) evaluateDirect()
+        else if (applied) evaluate()
     }
 
     private fun applyState(closed: Boolean): Boolean {
         if (currentMode == Prefs.MODE_DIRECT) {
             if (pendingAction != null) return false
             if (DirectPolicy.decide(closed, ShimState.directCurrentState,
-                    DirectStateController.hasClosedRequest) == DirectPolicy.Command.NONE) {
-                decider.onApplied(closed, true)
+                    DirectStateController.hasClosedRequest) == DirectPolicy.Command.NONE &&
+                !(!closed && recoveryPending)) {
                 return true
             }
+            Timeline.event("decision ${if (closed) "CLOSED" else "CANCEL"}")
             val id = UUID.randomUUID().toString()
             pendingAction = if (closed) StateActivity.ACTION_CLOSED else StateActivity.ACTION_OPEN
             pendingId = id
@@ -371,12 +517,13 @@ class FoldService : Service() {
             }
             handler.postDelayed(pendingTimeout, DIRECT_TIMEOUT_MS)
             try {
+                Timeline.event("startActivity action=$pendingAction id=$id")
                 startActivity(Intent(this, StateActivity::class.java).apply {
                     putExtra(StateActivity.EXTRA_ACTION, pendingAction)
                     putExtra(StateActivity.EXTRA_ID, id)
                     putExtra(StateActivity.EXTRA_RECEIVER, receiver)
                     putExtra(StateActivity.EXTRA_DEADLINE, SystemClock.elapsedRealtime() + DIRECT_TIMEOUT_MS)
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_ANIMATION)
                 })
                 return true
             } catch (e: Exception) {
@@ -398,8 +545,14 @@ class FoldService : Service() {
         return ok
     }
 
+    private fun createWakeLock() {
+        wakeLock = getSystemService(PowerManager::class.java)
+            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "FoldLidShim:event")
+            .apply { setReferenceCounted(false) }
+    }
+
     private fun releaseWakeLock() {
-        if (wakeLock.isHeld) wakeLock.release()
+        if (::wakeLock.isInitialized && wakeLock.isHeld) wakeLock.release()
     }
 
     private fun overrideText(): String =
@@ -469,17 +622,21 @@ class FoldService : Service() {
         private const val NOTIF_ID = 1
         private const val DIRECT_TIMEOUT_MS = 3000L
         const val ACTION_RELOAD = "reload"
+        const val ACTION_STOP = "stop"
 
         fun reload(context: Context) {
             context.startService(Intent(context, FoldService::class.java).apply { action = ACTION_RELOAD })
         }
 
         fun start(context: Context) {
+            Prefs.manualStart(context)
             context.startForegroundService(Intent(context, FoldService::class.java))
         }
 
         fun stop(context: Context) {
-            context.stopService(Intent(context, FoldService::class.java))
+            if (Prefs.getMode(context) == Prefs.MODE_DIRECT && ShimState.serviceRunning) {
+                context.startService(Intent(context, FoldService::class.java).setAction(ACTION_STOP))
+            } else context.stopService(Intent(context, FoldService::class.java))
         }
     }
 }

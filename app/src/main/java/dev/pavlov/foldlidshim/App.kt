@@ -10,6 +10,8 @@ class App : Application() {
             HiddenApiBypass.addHiddenApiExemptions("L")
         } catch (_: Exception) {
         }
-        ShizukuBridge.init()
+        Timeline.init(this)
+        ShizukuBridge.setDirectMode(Prefs.getMode(this) == Prefs.MODE_DIRECT)
+        if (Prefs.getMode(this) == Prefs.MODE_SHIZUKU) ShizukuBridge.init()
     }
 }

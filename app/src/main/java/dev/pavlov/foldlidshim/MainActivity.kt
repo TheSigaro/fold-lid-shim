@@ -39,13 +39,15 @@ class MainActivity : androidx.appcompat.app.AppCompatActivity() {
     private lateinit var tvDsmStatus: TextView
     private lateinit var tvStatus: TextView
 
+    private var resumed = false
     private var debugSensors: AngleSensors? = null
 
     private val main = Handler(Looper.getMainLooper())
     private val tick = object : Runnable {
         override fun run() {
             refresh()
-            main.postDelayed(this, 200)
+            if (resumed && findViewById<View>(R.id.sensorDetails).visibility == View.VISIBLE)
+                main.postDelayed(this, 200)
         }
     }
 
@@ -92,6 +94,35 @@ class MainActivity : androidx.appcompat.app.AppCompatActivity() {
         val (close, open) = Prefs.thresholds(this)
         etClose.setText(formatDeg(close))
         etOpen.setText(formatDeg(open))
+
+        val controls = etOpen.parent as android.view.ViewGroup
+        val early = CheckBox(this).apply {
+            text = "Ранний запрос при складывании"
+            isChecked = Prefs.earlyEnabled(this@MainActivity)
+        }
+        val earlyAngle = EditText(this).apply {
+            hint = "Угол раннего запроса (15-90°)"
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER or android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL
+            setText(formatDeg(Prefs.earlyAngle(this@MainActivity)))
+        }
+        controls.addView(early)
+        controls.addView(earlyAngle)
+        controls.addView(Button(this).apply {
+            text = "Сохранить ранний запрос"
+            setOnClickListener {
+                val value = earlyAngle.text.toString().replace(',', '.').toFloatOrNull()
+                if (value == null || !Prefs.setEarly(this@MainActivity, early.isChecked, value))
+                    Toast.makeText(this@MainActivity, "Угол должен быть от порога закрытия до 90°, минимум 15°", Toast.LENGTH_LONG).show()
+                else if (isServiceRunning()) FoldService.reload(this@MainActivity)
+            }
+        })
+        controls.addView(Button(this).apply {
+            text = "Журнал"
+            setOnClickListener {
+                AlertDialog.Builder(this@MainActivity).setTitle("Журнал")
+                    .setMessage(Timeline.read().takeLast(24_000)).setPositiveButton(android.R.string.ok, null).show()
+            }
+        })
 
         // Restore mode selection
         val mode = Prefs.getMode(this)
@@ -181,6 +212,9 @@ class MainActivity : androidx.appcompat.app.AppCompatActivity() {
             val details = findViewById<View>(R.id.sensorDetails)
             details.visibility = if (details.visibility == View.GONE) View.VISIBLE else View.GONE
             (it as Button).text = if (details.visibility == View.GONE) "Датчики - раскрыть" else "Датчики - свернуть"
+            restartDebugSensors()
+            main.removeCallbacks(tick)
+            if (details.visibility == View.VISIBLE && resumed) main.post(tick)
         }
         findViewById<Button>(R.id.btnShizukuNotifications).setOnClickListener {
             try {
@@ -195,12 +229,28 @@ class MainActivity : androidx.appcompat.app.AppCompatActivity() {
 
     override fun onStart() {
         super.onStart()
-        restartDebugSensors()
-        ShizukuBridge.addListener(bridgeListener)
+        ShimState.addListener(bridgeListener)
+        if (Prefs.getMode(this) == Prefs.MODE_SHIZUKU) ShizukuBridge.addListener(bridgeListener)
         if (Prefs.getMode(this) == Prefs.MODE_DIRECT) {
             DirectStateController.tryRegisterCallback(applicationContext)
         } else Thread { ShizukuBridge.readDeviceState(); main.post { refresh() } }.start()
-        main.post(tick)
+        refresh()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        resumed = true
+        restartDebugSensors()
+        main.removeCallbacks(tick)
+        if (findViewById<View>(R.id.sensorDetails).visibility == View.VISIBLE) main.post(tick)
+    }
+
+    override fun onPause() {
+        resumed = false
+        debugSensors?.stop()
+        debugSensors = null
+        main.removeCallbacks(tick)
+        super.onPause()
     }
 
     override fun onStop() {
@@ -208,6 +258,7 @@ class MainActivity : androidx.appcompat.app.AppCompatActivity() {
         debugSensors = null
         main.removeCallbacks(tick)
         ShizukuBridge.removeListener(bridgeListener)
+        ShimState.removeListener(bridgeListener)
         super.onStop()
     }
 
@@ -224,8 +275,12 @@ class MainActivity : androidx.appcompat.app.AppCompatActivity() {
         if (oldMode == newMode) return
         Prefs.setMode(this, newMode)
 
-        if (newMode == Prefs.MODE_SHIZUKU) ShizukuBridge.ensureBound()
-        else DirectStateController.tryRegisterCallback(applicationContext)
+        // A running service first releases the old override before changing bindings.
+        if (!isServiceRunning()) {
+            ShizukuBridge.setDirectMode(newMode == Prefs.MODE_DIRECT)
+            if (newMode == Prefs.MODE_SHIZUKU) { ShizukuBridge.init(); ShizukuBridge.ensureBound() }
+            else DirectStateController.tryRegisterCallback(applicationContext)
+        }
 
         if (isServiceRunning()) FoldService.reload(this)
         refresh()
@@ -245,6 +300,8 @@ class MainActivity : androidx.appcompat.app.AppCompatActivity() {
 
     private fun restartDebugSensors() {
         debugSensors?.stop()
+        debugSensors = null
+        if (!resumed || findViewById<View>(R.id.sensorDetails).visibility != View.VISIBLE) return
         debugSensors = AngleSensors(getSystemService(SensorManager::class.java), Prefs.invertAxes(this))
             .also { it.start(main) }
     }
@@ -258,6 +315,7 @@ class MainActivity : androidx.appcompat.app.AppCompatActivity() {
         findViewById<TextView>(R.id.tvAccessibility).text = getString(R.string.accessibility_status,
             if (FoldConfirmAccessibilityService.isEnabled(this)) "включено" else "выключено")
         val mode = Prefs.getMode(this)
+        findViewById<Button>(R.id.btnStartShizuku).isEnabled = mode == Prefs.MODE_SHIZUKU
         val status = ShizukuBridge.status(this)
         if (status == ShizukuStatus.READY && mode == Prefs.MODE_SHIZUKU) ShizukuBridge.ensureBound()
 
@@ -304,7 +362,7 @@ class MainActivity : androidx.appcompat.app.AppCompatActivity() {
             }
         }
 
-        val running = isServiceRunning()
+        val running = Prefs.isEnabled(this)
         if (swService.isChecked != running) {
             swService.setOnCheckedChangeListener(null)
             swService.isChecked = running
@@ -349,6 +407,11 @@ class MainActivity : androidx.appcompat.app.AppCompatActivity() {
         }
 
         // Show last callback/test result
+        if (Prefs.restartBlocked(this)) parts.add(RestartGuard.MESSAGE)
+        if (mode == Prefs.MODE_DIRECT && (ShimState.hallDiagnosis == HallDiagnosis.Result.STUCK_CLOSED ||
+                (DirectStateController.manualOpenGeneration > 0 && ShimState.directCurrentState == 0 &&
+                    !DirectStateController.hasClosedRequest)))
+            parts.add(StateActivity.OPEN_UNAVAILABLE)
         val lastResult = ShimState.lastCallbackResult
         if (!lastResult.isNullOrEmpty()) {
             parts.add(lastResult)

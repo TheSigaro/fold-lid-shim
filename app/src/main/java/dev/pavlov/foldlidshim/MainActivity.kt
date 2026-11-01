@@ -1,6 +1,5 @@
 package dev.pavlov.foldlidshim
 
-import android.Manifest
 import android.app.Activity
 import android.app.ActivityManager
 import android.app.AlertDialog
@@ -151,11 +150,17 @@ class MainActivity : Activity() {
             }
         }
 
-        Shizuku.addRequestPermissionResultListener(permissionListener)
-
-        if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQUEST_NOTIFICATIONS)
+        findViewById<Button>(R.id.btnAdbPairing).setOnClickListener {
+            startActivity(Intent(this, AdbPairingActivity::class.java))
         }
+        findViewById<Button>(R.id.btnStartShizuku).setOnClickListener {
+            startForegroundService(Intent(this, FoldService::class.java).setAction(FoldService.ACTION_START_SHIZUKU))
+        }
+        findViewById<Switch>(R.id.swDisableAdb).apply {
+            isChecked = Prefs.disableWirelessAfterStart(this@MainActivity)
+            setOnCheckedChangeListener { _, checked -> Prefs.setDisableWirelessAfterStart(this@MainActivity, checked) }
+        }
+        Shizuku.addRequestPermissionResultListener(permissionListener)
     }
 
     override fun onStart() {
@@ -220,6 +225,11 @@ class MainActivity : Activity() {
     }
 
     private fun refresh() {
+        val attempt = ShimState.autoStartAttempt
+        findViewById<TextView>(R.id.tvAutoStart).text = getString(R.string.autostart_status,
+            if (dev.pavlov.foldlidshim.adb.AdbIdentity.exists(this)) "есть" else "нет",
+            if (ShizukuAutoStarter.hasSecureSettings(this)) "есть" else "нет",
+            attempt?.let { "${java.text.DateFormat.getDateTimeInstance().format(java.util.Date(it.timeMs))}: ${it.stage}${it.error?.let { error -> ": $error" }.orEmpty()}" } ?: "Попыток ещё не было")
         val mode = Prefs.getMode(this)
         val status = ShizukuBridge.status(this)
         if (status == ShizukuStatus.READY && mode == Prefs.MODE_SHIZUKU) ShizukuBridge.ensureBound()
@@ -442,6 +452,5 @@ class MainActivity : Activity() {
 
     companion object {
         private const val REQUEST_SHIZUKU = 100
-        private const val REQUEST_NOTIFICATIONS = 101
     }
 }

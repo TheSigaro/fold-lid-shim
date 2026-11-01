@@ -1,5 +1,6 @@
 package dev.pavlov.foldlidshim
 
+import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -21,6 +22,7 @@ import java.util.UUID
 
 class FoldService : Service() {
 
+    private var autoStarter: ShizukuAutoStarter? = null
     private lateinit var thread: HandlerThread
     private lateinit var handler: Handler
     private lateinit var wakeLock: PowerManager.WakeLock
@@ -67,13 +69,21 @@ class FoldService : Service() {
         }
     }
 
+    @Synchronized private fun ensureAutoStarter(): ShizukuAutoStarter =
+        autoStarter ?: ShizukuAutoStarter(this).also { autoStarter = it }
+
+    @Synchronized private fun stopAutoStarter() {
+        autoStarter?.close()
+        autoStarter = null
+    }
+
     override fun onCreate() {
         super.onCreate()
         currentMode = Prefs.getMode(this)
         loadThresholds()
         notificationManager = getSystemService(NotificationManager::class.java)
         notificationManager.createNotificationChannel(
-            NotificationChannel(CHANNEL_ID, getString(R.string.notif_channel), NotificationManager.IMPORTANCE_LOW)
+            NotificationChannel(CHANNEL_ID, getString(R.string.notif_channel), NotificationManager.IMPORTANCE_MIN)
         )
         startForeground(
             NOTIF_ID,
@@ -92,6 +102,7 @@ class FoldService : Service() {
         if (currentMode == Prefs.MODE_SHIZUKU) {
             ShizukuBridge.addListener(bridgeListener)
             ShizukuBridge.ensureBound()
+            ensureAutoStarter()
         } else {
             Log.i(Config.TAG, "Running in direct mode, Shizuku not needed")
         }
@@ -102,6 +113,9 @@ class FoldService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_START_SHIZUKU) {
+            ensureAutoStarter().requestNow()
+        }
         if (intent?.action == ACTION_RELOAD) {
             handler.post { if (!stopping) handleReload() }
         }
@@ -130,11 +144,13 @@ class FoldService : Service() {
             ShimState.overrideClosed = false
             shizukuOverrideActive = false
             if (currentMode == Prefs.MODE_SHIZUKU) ShizukuBridge.removeListener(bridgeListener)
+            stopAutoStarter()
             currentMode = newMode
             decider.reset()
             if (currentMode == Prefs.MODE_SHIZUKU) {
                 ShizukuBridge.addListener(bridgeListener)
                 ShizukuBridge.ensureBound()
+                ensureAutoStarter()
             }
         }
         val source = Prefs.angleSource(this)
@@ -154,6 +170,7 @@ class FoldService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        stopAutoStarter()
         ShimState.removeListener(stateListener)
         handler.post {
             stopping = true
@@ -337,6 +354,9 @@ class FoldService : Service() {
     private fun overrideText(): String =
         getString(if (ShimState.overrideClosed) R.string.state_closed else R.string.state_open)
 
+    // Updates the mandatory foreground-service notification. POST_NOTIFICATIONS is
+    // intentionally not requested: the service works when its notification is hidden.
+    @SuppressLint("NotificationPermission")
     private fun publish(force: Boolean, notifyState: Boolean = true) {
         if (notifyState) ShimState.changed()
         val angle = lastAngle
@@ -391,7 +411,8 @@ class FoldService : Service() {
     }
 
     companion object {
-        private const val CHANNEL_ID = "hinge_state"
+        const val ACTION_START_SHIZUKU = "dev.pavlov.foldlidshim.START_SHIZUKU"
+        private const val CHANNEL_ID = "hinge_state_min"
         private const val NOTIF_ID = 1
         private const val DIRECT_TIMEOUT_MS = 3000L
         const val ACTION_RELOAD = "reload"

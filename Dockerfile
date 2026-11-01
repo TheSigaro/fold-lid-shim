@@ -18,7 +18,7 @@ RUN mkdir -p "${ANDROID_HOME}/cmdline-tools" \
     && rm /tmp/cmdline-tools.zip
 
 RUN (yes || true) | sdkmanager --licenses > /dev/null \
-    && sdkmanager "platforms;android-36" "build-tools;36.0.0"
+    && sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;28.0.13004108" "cmake;3.22.1"
 
 WORKDIR /src
 COPY . .

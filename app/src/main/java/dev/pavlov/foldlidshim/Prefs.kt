@@ -40,6 +40,11 @@ object Prefs {
             sp(context).edit().putString("angle_source", source).apply()
     }
 
+    fun disableWirelessAfterStart(context: Context): Boolean = sp(context).getBoolean("disable_adb_after_start", true)
+    fun setDisableWirelessAfterStart(context: Context, value: Boolean) {
+        sp(context).edit().putBoolean("disable_adb_after_start", value).apply()
+    }
+
     fun forceOpened(context: Context): Boolean = sp(context).getBoolean("force_opened", true)
     fun setForceOpened(context: Context, value: Boolean) {
         sp(context).edit().putBoolean("force_opened", value).apply()

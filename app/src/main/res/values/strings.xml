@@ -65,4 +65,9 @@
     <string name="axis_y">Y</string>
     <string name="axis_z">Z</string>
     <string name="sensor_debug">Датчики\n%1$s\nТекущее решение: %2$s</string>
+    <string name="autostart_title">Автозапуск Shizuku</string>
+    <string name="adb_pairing">Сопряжение adb</string>
+    <string name="start_shizuku_now">Запустить Shizuku сейчас</string>
+    <string name="disable_adb">Выключать беспроводную отладку после запуска</string>
+    <string name="autostart_status">Ключ adb: %1$s\nWRITE_SECURE_SETTINGS: %2$s\nadb shell pm grant dev.pavlov.foldlidshim android.permission.WRITE_SECURE_SETTINGS\nПоследняя попытка: %3$s</string>
 </resources>

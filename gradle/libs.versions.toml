@@ -6,6 +6,9 @@ kotlin = "2.1.21"
 shizuku = "13.1.5"
 
 [libraries]
+bouncycastle = { module = "org.bouncycastle:bcpkix-jdk18on", version = "1.80" }
+conscrypt = { module = "org.conscrypt:conscrypt-android", version = "2.5.3" }
+boringssl = { module = "io.github.vvb2060.ndk:boringssl", version = "20250114" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 hiddenapibypass = { group = "org.lsposed.hiddenapibypass", name = "hiddenapibypass", version.ref = "hiddenapibypass" }
 shizuku-api = { group = "dev.rikka.shizuku", name = "api", version.ref = "shizuku" }

@@ -67,6 +67,17 @@
             android:layout_height="wrap_content"
             android:text="@string/btn_overlay_permission" />
 
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:text="@string/autostart_title" android:textSize="20sp" />
+        <TextView android:id="@+id/tvAutoStart" android:layout_width="match_parent"
+            android:layout_height="wrap_content" android:textIsSelectable="true" />
+        <Button android:id="@+id/btnAdbPairing" android:layout_width="match_parent"
+            android:layout_height="wrap_content" android:text="@string/adb_pairing" />
+        <Button android:id="@+id/btnStartShizuku" android:layout_width="match_parent"
+            android:layout_height="wrap_content" android:text="@string/start_shizuku_now" />
+        <Switch android:id="@+id/swDisableAdb" android:layout_width="match_parent"
+            android:layout_height="wrap_content" android:text="@string/disable_adb" />
+
         <!-- DSM status (visible only in direct mode) -->
         <TextView
             android:id="@+id/tvDsmStatus"

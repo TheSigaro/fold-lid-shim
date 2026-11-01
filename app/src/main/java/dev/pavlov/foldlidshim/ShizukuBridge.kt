@@ -24,6 +24,52 @@ object ShizukuBridge {
     @Volatile private var bindStartedAt = 0L
     @Volatile private var initialized = false
 
+    @Volatile var ownOverride = false
+        private set
+    @Volatile var desiredClosed: Boolean? = null
+        private set
+    @Volatile var currentState: Int? = null
+        private set
+    @Volatile private var baseState: Int? = null
+
+    @Synchronized fun readDeviceState(waitMs: Long = 0): DeviceStateInfo? = try {
+        ensureBound()
+        val deadline = SystemClock.elapsedRealtime() + waitMs
+        while (service == null && SystemClock.elapsedRealtime() < deadline) Thread.sleep(50)
+        service?.readDeviceState()?.let { DeviceStateInfo.parse(it) }?.takeIf { it.baseState != null }?.also {
+            baseState = it.baseState
+            val current = service?.readCurrentState()?.takeIf { state -> state in 0..5 }
+            currentState = current ?: it.overrideState ?: it.baseState
+            val requestedState = if (desiredClosed == true) 0 else 3
+            if (!it.overrideActive || (ownOverride && it.overrideState != requestedState)) {
+                ownOverride = false
+                desiredClosed = null
+            }
+        }
+    } catch (_: Exception) { null }
+
+    /** Polling may release a matching override, but must not reissue state commands. */
+    @Synchronized fun releaseMatchingOverride(): DeviceStateInfo? {
+        val info = readDeviceState()
+        val desired = desiredClosed
+        if (desired != null && ReconcilePolicy.decide(desired, info, ownOverride) == Command.RESET) {
+            exec(Config.ARG_RESET, 1500)
+        }
+        return info
+    }
+
+    @Synchronized fun reconcile(closed: Boolean, forceOpened: Boolean = true): Boolean {
+        val info = readDeviceState()
+        val command = ReconcilePolicy.decide(closed, info, ownOverride)
+        val arg = when (command) {
+            Command.NONE -> return true
+            Command.RESET -> Config.ARG_RESET
+            Command.CLOSED -> Config.ARG_CLOSED
+            Command.OPENED -> if (forceOpened) Config.ARG_OPENED else Config.ARG_RESET
+        }
+        return exec(arg, 1500)?.code == 0
+    }
+
     private val listeners = CopyOnWriteArrayList<Runnable>()
 
     private val userServiceArgs by lazy {
@@ -31,7 +77,7 @@ object ShizukuBridge {
             .daemon(false)
             .processNameSuffix("shell")
             .debuggable(false)
-            .version(1)
+            .version(2)
     }
 
     private val connection = object : ServiceConnection {
@@ -51,7 +97,7 @@ object ShizukuBridge {
     }
 
     fun addListener(listener: Runnable) {
-        listeners.add(listener)
+        listeners.addIfAbsent(listener)
     }
 
     fun removeListener(listener: Runnable) {
@@ -129,7 +175,7 @@ object ShizukuBridge {
     }
 
     /** Blocking. Returns null if the shell service is not available within waitMs. */
-    fun exec(arg: String, waitMs: Long): ExecResult? {
+    @Synchronized fun exec(arg: String, waitMs: Long): ExecResult? {
         val deadline = SystemClock.elapsedRealtime() + waitMs
         var svc = service
         while (svc == null) {
@@ -148,6 +194,13 @@ object ShizukuBridge {
             val code = first.removePrefix("exit=").toIntOrNull() ?: -4
             val out = raw.substringAfter('\n', "").trim()
             Log.i(Config.TAG, "cmd device_state state $arg: code=$code output=\"$out\"")
+            if (code == 0) {
+                ownOverride = arg != Config.ARG_RESET
+                desiredClosed = if (ownOverride) arg == Config.ARG_CLOSED else null
+                currentState = if (ownOverride) arg.toIntOrNull() else baseState
+                ShimState.overrideClosed = ownOverride && arg == Config.ARG_CLOSED
+                ShimState.changed()
+            }
             ExecResult(code, out)
         } catch (t: Throwable) {
             Log.e(Config.TAG, "cmd device_state state $arg: binder call failed: $t")

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="AppTheme" parent="@android:style/Theme.DeviceDefault.DayNight" />
+    <style name="AppTheme" parent="Theme.Material3.DayNight.NoActionBar" />
 
     <style name="StateActivityTheme" parent="@android:style/Theme.DeviceDefault.DayNight">
         <item name="android:windowIsTranslucent">true</item>

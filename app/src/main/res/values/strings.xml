@@ -7,7 +7,7 @@
     <string name="shizuku_not_running">не запущен</string>
     <string name="shizuku_no_permission">нет разрешения</string>
     <string name="shizuku_ready">готов</string>
-    <string name="btn_request_permission">Запросить разрешение Shizuku</string>
+    <string name="btn_request_permission">Выдать разрешение</string>
 
     <string name="mode_label">Режим работы:</string>
     <string name="mode_direct">Прямой (нужно подтверждать на экране)</string>

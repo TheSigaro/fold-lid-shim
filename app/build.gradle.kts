@@ -58,6 +58,7 @@ kotlin {
 }
 
 dependencies {
+    implementation(libs.material)
     testImplementation(libs.junit)
     implementation(libs.hiddenapibypass)
     implementation(libs.bouncycastle)

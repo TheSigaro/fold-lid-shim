@@ -204,6 +204,14 @@ class PreferenceAdbKeyStore(private val preference: SharedPreferences) : AdbKeyS
         check(preference.edit().putString(preferenceKey, Base64.encodeToString(bytes, Base64.NO_WRAP)).commit()) { "Cannot persist adb key" }
     }
 
+    fun putPaired(bytes: ByteArray, imported: Boolean) {
+        check(preference.edit()
+            .putString(preferenceKey, Base64.encodeToString(bytes, Base64.NO_WRAP))
+            .putBoolean("adb_key_paired", true)
+            .putBoolean("adb_key_imported", imported)
+            .commit()) { "Не удалось сохранить ключ adb" }
+    }
+
     override fun get(): ByteArray? {
         if (!preference.contains(preferenceKey)) return null
         return Base64.decode(preference.getString(preferenceKey, null), Base64.NO_WRAP)

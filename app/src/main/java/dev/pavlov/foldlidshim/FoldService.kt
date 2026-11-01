@@ -32,7 +32,31 @@ class FoldService : Service() {
     private var currentSource = Config.DEFAULT_SOURCE
     private var currentInvert = booleanArrayOf(true, false, true)
     private var forceOpened = true
-    private var shizukuOverrideActive = false
+    private val shizukuOverrideActive get() = ShizukuBridge.ownOverride
+    private val hall = HallDiagnosis(SystemClock.elapsedRealtime())
+    private var hingeSensors: AngleSensors? = null
+    private val reconcileTick = object : Runnable {
+        override fun run() {
+            if (stopping) return
+            if (currentMode == Prefs.MODE_SHIZUKU) {
+                hall.observe(ShizukuBridge.releaseMatchingOverride()?.baseState)
+                updateHallDiagnosis()
+                evaluate()
+                publish(force = true)
+            }
+            handler.postDelayed(this, 30_000)
+        }
+    }
+
+    private fun observeDeviceState() {
+        hall.observe(ShizukuBridge.readDeviceState()?.baseState)
+        updateHallDiagnosis()
+    }
+
+    private fun updateHallDiagnosis() {
+        val (close, open) = Prefs.thresholds(this)
+        ShimState.hallDiagnosis = hall.diagnose(SystemClock.elapsedRealtime(), close, open)
+    }
     private val startupGate = StartupGate()
     private var lastPublishAt = 0L
 
@@ -108,7 +132,14 @@ class FoldService : Service() {
         }
 
         sensorManager = getSystemService(SensorManager::class.java)
-        handler.post { registerAngleSource() }
+        handler.post {
+            hingeSensors = sensorManager?.let { manager ->
+                AngleSensors(manager, currentInvert, Config.SOURCE_HINGE) { _, angle -> hall.onAngle(angle) }
+                    .also { it.start(handler) }
+            }
+            registerAngleSource()
+            reconcileTick.run()
+        }
         handler.post { publish(force = true) }
     }
 
@@ -142,7 +173,6 @@ class FoldService : Service() {
                 return
             }
             ShimState.overrideClosed = false
-            shizukuOverrideActive = false
             if (currentMode == Prefs.MODE_SHIZUKU) ShizukuBridge.removeListener(bridgeListener)
             stopAutoStarter()
             currentMode = newMode
@@ -175,19 +205,19 @@ class FoldService : Service() {
         handler.post {
             stopping = true
             angleSensors?.stop()
+            hingeSensors?.stop()
             ShizukuBridge.removeListener(bridgeListener)
             cancelHold()
             clearPendingAction()
-            if (currentMode == Prefs.MODE_SHIZUKU || ShimState.overrideClosed ||
-                (currentMode == Prefs.MODE_DIRECT && DirectStateController.hasRequest)) {
-                val success = if (currentMode == Prefs.MODE_DIRECT) {
-                    DirectStateController.cancel(this)
-                } else {
-                    ShizukuBridge.exec(Config.ARG_RESET, 2000)?.code == 0
-                }
-                if (success) ShimState.overrideClosed = false
-                else ShimState.lastCallbackResult = ShimState.lastCallbackResult ?: "stop: cancel failed"
+            var success = true
+            if (currentMode == Prefs.MODE_DIRECT && (ShimState.overrideClosed || DirectStateController.hasRequest)) {
+                success = DirectStateController.cancel(this)
             }
+            if (shizukuOverrideActive) {
+                success = (ShizukuBridge.exec(Config.ARG_RESET, 2000)?.code == 0) && success
+            }
+            if (success) ShimState.overrideClosed = false
+            else ShimState.lastCallbackResult = ShimState.lastCallbackResult ?: "stop: cancel failed"
             ShimState.angle = null
             ShimState.decision = "Служба остановлена"
             ShimState.changed()
@@ -238,6 +268,14 @@ class FoldService : Service() {
 
     private fun evaluate() {
         if (stopping || !startupGate.ready) return
+        if (currentMode == Prefs.MODE_SHIZUKU) {
+            val (close, open) = Prefs.thresholds(this)
+            ShimState.hallDiagnosis = hall.diagnose(SystemClock.elapsedRealtime(), close, open)
+            if (ShimState.hallDiagnosis == HallDiagnosis.Result.STUCK_CLOSED) {
+                ShimState.decision = "Ручное управление - используйте плитку Экран Fold"
+                return
+            }
+        }
         val angle = lastAngle ?: return
         // Feed every zone, even while an activity is pending, to cancel interrupted holds.
         // The decider suppresses pending commands. hasRequest must not block opening.
@@ -330,19 +368,14 @@ class FoldService : Service() {
             }
         }
 
-        val arg = if (closed) Config.ARG_CLOSED
-            else if (forceOpened) Config.ARG_OPENED else Config.ARG_RESET
-        val result = ShizukuBridge.exec(arg, 1500)
-        val ok = result != null && result.code == 0
-        decider.onApplied(closed, ok)
-        if (ok) {
-            ShimState.overrideClosed = closed
-            shizukuOverrideActive = arg != Config.ARG_RESET
-            Log.i(Config.TAG, "Shizuku mode state change: ${if (closed) "OPEN -> CLOSED" else "CLOSED -> OPEN"} angle=$lastAngle")
-        } else {
-            ShimState.lastCallbackResult = "Shizuku $arg failed: $result"
-            Log.w(Config.TAG, "Shizuku mode state change to ${if (closed) "CLOSED" else "OPEN"} not applied, result=$result")
+        observeDeviceState()
+        if (ShimState.hallDiagnosis == HallDiagnosis.Result.STUCK_CLOSED) {
+            decider.onApplied(closed, false)
+            return false
         }
+        val ok = ShizukuBridge.reconcile(closed, forceOpened)
+        decider.onApplied(closed, ok)
+        if (!ok) ShimState.lastCallbackResult = "Не удалось изменить состояние через Shizuku"
         ShimState.changed()
         return ok
     }
@@ -400,11 +433,13 @@ class FoldService : Service() {
             this, 0, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
-        return Notification.Builder(this, CHANNEL_ID)
+        return androidx.core.app.NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(getString(R.string.notif_title))
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_menu_rotate)
             .setOngoing(true)
+            .setSilent(true)
+            .setVisibility(androidx.core.app.NotificationCompat.VISIBILITY_SECRET)
             .setOnlyAlertOnce(true)
             .setContentIntent(open)
             .build()

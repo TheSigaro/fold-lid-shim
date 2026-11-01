@@ -4,7 +4,9 @@ interface IShellService {
     // Reserved Shizuku transaction code: stop the UserService process.
     void destroy() = 16777114;
 
-    // Runs "cmd device_state state <arg>", arg is "0" or "reset".
+    // Runs "cmd device_state state <arg>", arg is "0", "3" or "reset".
     // Returns "exit=<code>\n<stdout and stderr>".
     String runDeviceState(String arg) = 1;
+    String readDeviceState() = 2;
+    int readCurrentState() = 3;
 }

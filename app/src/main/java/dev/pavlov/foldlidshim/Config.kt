@@ -13,7 +13,7 @@ object Config {
     const val SOURCE_SAMSUNG = "samsung"
     const val SOURCE_ACCEL = "accel"
     const val SOURCE_HINGE = "hinge"
-    const val DEFAULT_SOURCE = SOURCE_SAMSUNG
+    const val DEFAULT_SOURCE = SOURCE_HINGE
     const val SAMSUNG_STRING_TYPE = "com.samsung.sensor.folding_angle"
     const val SAMSUNG_TYPE = 65686
     const val SUB_NAME = "Accelerometer-Sub"

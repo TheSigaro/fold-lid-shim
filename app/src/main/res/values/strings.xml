@@ -56,9 +56,9 @@
     <string name="notif_waiting_angle">Ожидание угла шарнира, override: %1$s</string>
     <string name="notif_status">Угол: %1$s, override: %2$s</string>
     <string name="source_label">Источник угла</string>
-    <string name="source_samsung">samsung - Folding Angle (по умолчанию)</string>
-    <string name="source_accel">accel - два акселерометра</string>
-    <string name="source_hinge">hinge - TYPE_HINGE_ANGLE</string>
+    <string name="source_samsung">samsung - Folding Angle (закрыт разрешением Samsung SSENSOR)</string>
+    <string name="source_accel">accel - два акселерометра (sub закрыт SSENSOR)</string>
+    <string name="source_hinge">hinge - TYPE_HINGE_ANGLE (по умолчанию)</string>
     <string name="force_opened">Принудительное OPENED при раскрытии</string>
     <string name="invert_sub">Инверсия осей sub</string>
     <string name="axis_x">X</string>

@@ -34,6 +34,15 @@
             android:multiprocess="false"
             android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
 
+        <activity
+            android:name=".BinderNudgeActivity"
+            android:process=":nudge"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity="" />
+
         <activity android:name=".AdbPairingActivity" android:exported="false" />
         <service android:name=".FoldTileService" android:exported="true"
             android:label="Экран Fold" android:icon="@android:drawable/ic_menu_view"

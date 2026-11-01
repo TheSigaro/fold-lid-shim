@@ -28,7 +28,7 @@ adb shell pm grant dev.pavlov.foldlidshim android.permission.WRITE_SECURE_SETTIN
 4. Когда Shizuku работает, нажмите «Выдать разрешение» и подтвердите доступ приложения.
 5. Включите службу. При необходимости отключите оптимизацию батареи.
 
-Автозапуск проверяет binder. Если Shizuku доступен, пишет «Shizuku уже работает». Иначе включает `adb_wifi_enabled`, ищет локальный `_adb-tls-connect._tcp`, подключается по TLS с сохранённым ключом и запускает starter установленного Shizuku. При отсутствии порта выполняется переключение беспроводной отладки. После успеха настройка «Выключать беспроводную отладку после запуска» выключает её (включена по умолчанию).
+Автозапуск проверяет binder. Если Shizuku доступен, пишет «Shizuku уже работает». Иначе включает `adb_wifi_enabled`, ищет локальный `_adb-tls-connect._tcp`, подключается по TLS с сохранённым ключом и запускает невидимую активити для запроса binder, ожидая до 3 секунд. Если binder не получен, запускает starter установленного Shizuku, затем до трёх раз с паузой 1,5 с снова запускает невидимую активити и ждёт binder, всего до 10 секунд. Shizuku отдаёт binder только при появлении нового процесса или смене состояния процесса, поэтому активити живёт в отдельном процессе `:nudge` и завершает его сразу после работы. При отсутствии порта выполняется переключение беспроводной отладки. После успеха настройка «Выключать беспроводную отладку после запуска» выключает её (включена по умолчанию).
 
 Повторы после ошибок: 10, 20, 40, 60 секунд, далее по 60 секунд, окно 30 минут. Событие Wi-Fi вызывает попытку сразу, одновременно работает одна попытка. Без ключа или WRITE_SECURE_SETTINGS причина показывается в карточке Shizuku. Последняя попытка содержит время, этап и ошибку. Если служба включена, BOOT_COMPLETED запускает её после перезагрузки; LOCKED_BOOT_COMPLETED не используется.
 
@@ -93,7 +93,7 @@ farm-check -C . --net -- /cache/android/with-android ./gradlew --no-daemon testD
 farm-check -C . -- shellcheck build.sh
 ```
 
-JUnit: `DeviceStateInfoTest`, `ReconcilePolicyTest`, `HallDiagnosisTest`, `AdbKeyPemTest`, а также существующие тесты FoldDecider, StartupGate, порогов, углов, adb-протокола и повторов. Нужны Android SDK 36, JDK 17, NDK 28.0.13004108, CMake 3.22.1. Docker-образ содержит NDK и CMake. `./build.sh` собирает через Docker APK в `out/app-debug.apk`.
+JUnit: `DeviceStateInfoTest`, `ReconcilePolicyTest`, `HallDiagnosisTest`, `AdbCommandsTest`, а также существующие тесты FoldDecider, StartupGate, порогов, углов, adb-протокола и повторов. Нужны Android SDK 36, JDK 17, NDK 28.0.13004108, CMake 3.22.1. Docker-образ содержит NDK и CMake. `./build.sh` собирает через Docker APK в `out/app-debug.apk`.
 
 ## Остановка и логи
 

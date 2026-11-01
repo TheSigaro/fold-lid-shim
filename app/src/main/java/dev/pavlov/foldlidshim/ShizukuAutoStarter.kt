@@ -101,38 +101,57 @@ class ShizukuAutoStarter(context: Context) : AutoCloseable {
             }
             checkActive()
             record("Подключение adb: 127.0.0.1:$port")
-            val info = context.packageManager.getApplicationInfo("moe.shizuku.privileged.api", 0)
-            val starter = "/data/local/tmp/shizuku_starter"
-            fun quote(value: String) = "'" + value.replace("'", "'\\''") + "'"
-            val command = "cp ${quote(info.nativeLibraryDir + "/libshizuku.so")} $starter && " +
-                "chmod 700 $starter && $starter --apk=${quote(info.sourceDir)}"
+            var alreadyRunning = false
             // starter may start the server before a shell stream ends with an IO error.
             // Binder is the authoritative success signal in either case.
             val commandError = runCatching {
                 AdbClient("127.0.0.1", port, key).use { client ->
                     client.connect()
                     checkActive()
-                    record("Запуск сервера Shizuku")
-                    client.shellCommand(command) { bytes ->
+                    record("Запрос binder")
+                    client.shellCommand(AdbCommands.nudge(context.packageName), null)
+                    alreadyRunning = awaitBinder(3_000)
+                    if (!alreadyRunning) {
                         checkActive()
-                        Log.i(Config.TAG, "Shizuku starter: ${bytes.toString(Charsets.UTF_8)}")
+                        val info = context.packageManager.getApplicationInfo("moe.shizuku.privileged.api", 0)
+                        record("Запуск сервера Shizuku")
+                        val starterError = runCatching {
+                            client.shellCommand(AdbCommands.starter(info.nativeLibraryDir, info.sourceDir)) { bytes ->
+                                checkActive()
+                                Log.i(Config.TAG, "Shizuku starter: ${bytes.toString(Charsets.UTF_8)}")
+                            }
+                        }.exceptionOrNull()
+                        checkActive()
+                        // The fresh server registers its process observer with a delay:
+                        // a nudge sent at once is missed, so nudge a few times with pauses.
+                        val nudgeError = runCatching {
+                            repeat(3) {
+                                if (Shizuku.pingBinder()) return@repeat
+                                Thread.sleep(1_500)
+                                checkActive()
+                                record("Запрос binder")
+                                client.shellCommand(AdbCommands.nudge(context.packageName), null)
+                                awaitBinder(2_500)
+                            }
+                        }.exceptionOrNull()
+                        starterError?.let { throw it }
+                        nudgeError?.let { throw it }
                     }
                 }
             }.exceptionOrNull()
             checkActive()
-            record("Ожидание binder Shizuku", commandError?.message)
-            val deadline = SystemClock.elapsedRealtime() + 10_000
-            while (!Shizuku.pingBinder() && SystemClock.elapsedRealtime() < deadline) {
-                checkActive()
-                Thread.sleep(200)
+            if (!alreadyRunning) {
+                record("Ожидание binder Shizuku", commandError?.message)
+                check(awaitBinder(10_000)) {
+                    "Shizuku не прислал binder за 10 секунд${commandError?.let { ": ${it.message}" }.orEmpty()}"
+                }
             }
-            check(Shizuku.pingBinder()) { "Shizuku не прислал binder за 10 секунд${commandError?.let { ": ${it.message}" }.orEmpty()}" }
             retry = false
             if (Prefs.disableWirelessAfterStart(context)) {
                 record("Выключение беспроводной отладки")
                 setWireless(false)
             }
-            record("Shizuku запущен")
+            record(if (alreadyRunning) "Сервер уже работал, binder получен" else "Shizuku запущен")
         } catch (e: Exception) {
             record(ShimState.autoStartAttempt?.stage ?: "Попытка", e.message ?: e.toString())
         } finally {
@@ -152,6 +171,15 @@ class ShizukuAutoStarter(context: Context) : AutoCloseable {
                 }
             }
         }
+    }
+    private fun awaitBinder(timeoutMs: Long): Boolean {
+        val deadline = SystemClock.elapsedRealtime() + timeoutMs
+        while (!Shizuku.pingBinder() && SystemClock.elapsedRealtime() < deadline) {
+            checkActive()
+            Thread.sleep(200)
+        }
+        checkActive()
+        return Shizuku.pingBinder()
     }
     private fun setWireless(enabled: Boolean) {
         check(Settings.Global.putInt(context.contentResolver, "adb_wifi_enabled", if (enabled) 1 else 0)) {

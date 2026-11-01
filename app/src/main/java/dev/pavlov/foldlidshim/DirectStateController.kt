@@ -17,6 +17,26 @@ object DirectStateController {
     // One executor for the process, including requests made by the UI test.
     private val callbackExecutor = Executors.newSingleThreadExecutor()
     private var generation = 0L
+    private var requestSequence = 0L
+    private val main = Handler(Looper.getMainLooper())
+    @Volatile private var requestedState: Int? = null
+    private var stateCallbackRegistered = false
+    private var stateCallback: Any? = null
+    val hasClosedRequest: Boolean get() = hasRequest && requestedState == 0
+
+    fun requestClosed(context: Context): Boolean = requestState(context, 0)
+    fun requestOpen(context: Context): Boolean = requestState(context, 3)
+
+    @Synchronized
+    fun applyDesired(context: Context, closed: Boolean): Boolean = when (
+        DirectPolicy.decide(closed, ShimState.directCurrentState, hasClosedRequest)
+    ) {
+        DirectPolicy.Command.NONE -> true
+        DirectPolicy.Command.CLOSED -> requestClosed(context)
+        DirectPolicy.Command.OPENED -> requestOpen(context)
+        DirectPolicy.Command.CANCEL -> cancel(context)
+    }
+
     @Volatile var hasRequest = false
         private set
 
@@ -49,13 +69,13 @@ object DirectStateController {
     }
 
     /**
-     * Request the device state to be set to CLOSED (folded).
+     * Request CLOSED (0) or OPENED (3) while the requester is the top app.
      * Returns true if the request was accepted, false otherwise.
      */
     @Synchronized
-    fun requestClosed(context: Context): Boolean {
+    private fun requestState(context: Context, state: Int): Boolean {
         ShimState.lastCallbackResult = "request failed"
-        Log.i(Config.TAG, "DirectStateController.requestClosed: starting")
+        Log.i(Config.TAG, "DirectStateController.requestState: state=$state starting")
         return try {
             ensureInitialized(context)
             val manager = getManagerInstance(context)
@@ -63,14 +83,32 @@ object DirectStateController {
                 Log.w(Config.TAG, "requestClosed: could not get DeviceStateManager instance")
                 false
             } else {
-                val request = buildRequest()
+                val request = buildRequest(state)
                 if (request == null) {
                     Log.w(Config.TAG, "requestClosed: could not build DeviceStateRequest")
                     false
                 } else {
-                    val requestGeneration = ++generation
-                    val callbackProxy = createCallbackProxy(requestGeneration)
+                    val previousGeneration = generation
+                    val previousState = requestedState
+                    val previousHasRequest = hasRequest
+                    val previousPending = ShimState.directConfirmationPending
+                    val previousUnrequestedState = ShimState.directUnrequestedState
+                    val requestGeneration = ++requestSequence
+                    generation = requestGeneration
+                    val callbackProxy = createCallbackProxy(requestGeneration, state)
                     hasRequest = true
+                    ShimState.directUnrequestedState = null
+                    requestedState = state
+                    ShimState.directRequestGeneration = requestGeneration
+                    ShimState.directConfirmationPending = true
+                    main.postDelayed({
+                        synchronized(this@DirectStateController) {
+                            if (generation == requestGeneration) {
+                                ShimState.directConfirmationPending = false
+                                ShimState.changed()
+                            }
+                        }
+                    }, 5000L)
                     ShimState.lastCallbackResult = "request accepted, waiting for activation"
                     try {
                         managerClassRef!!.getMethod(
@@ -80,11 +118,15 @@ object DirectStateController {
                             callbackInterfaceRef!!
                         ).invoke(manager, request, callbackExecutor, callbackProxy)
                     } catch (e: Exception) {
-                        hasRequest = false
-                        ++generation
+                        ShimState.directConfirmationPending = previousPending
+                        ShimState.directUnrequestedState = previousUnrequestedState
+                        requestedState = previousState
+                        hasRequest = previousHasRequest
+                        generation = previousGeneration
+                        ShimState.directRequestGeneration = previousGeneration
                         throw e
                     }
-                    Log.i(Config.TAG, "requestClosed: request accepted (callback pending)")
+                    Log.i(Config.TAG, "requestState: state=$state accepted (callback pending)")
                     ShimState.changed()
                     true
                 }
@@ -125,7 +167,9 @@ object DirectStateController {
                 false
             } else {
                 managerClassRef!!.getMethod("cancelStateRequest").invoke(manager)
-                ++generation
+                generation = ++requestSequence
+                ShimState.directConfirmationPending = false
+                requestedState = null
                 hasRequest = false
                 ShimState.overrideClosed = false
                 ShimState.lastCallbackResult = "canceled"
@@ -233,11 +277,11 @@ object DirectStateController {
         }
     }
 
-    private fun buildRequest(): Any? {
+    private fun buildRequest(state: Int): Any? {
         try {
             // newBuilder is a static method on DeviceStateRequest, not on Builder
             val newBuilder = requestClassRef!!.getMethod("newBuilder", Int::class.javaPrimitiveType)
-            val builder = newBuilder.invoke(null, 0) // identifier = 0 for closed state
+            val builder = newBuilder.invoke(null, state)
 
             val setFlags = builderClassRef!!.getMethod("setFlags", Int::class.javaPrimitiveType)
             // Flags: keep override until explicitly cancelled or process dies.
@@ -268,7 +312,7 @@ object DirectStateController {
      * Correctly handles Object methods (hashCode, equals, toString).
      * Updates ShimState immediately on callback events.
      */
-    private fun createCallbackProxy(requestGeneration: Long): Any {
+    private fun createCallbackProxy(requestGeneration: Long, state: Int): Any {
         val handler = object : java.lang.reflect.InvocationHandler {
             override fun invoke(proxy: Any, method: java.lang.reflect.Method, args: Array<out Any>?): Any? {
                 when (method.name) {
@@ -280,7 +324,7 @@ object DirectStateController {
                     if (requestGeneration != generation) return null
                     when (method.name) {
                         "onRequestActivated" -> {
-                            ShimState.overrideClosed = true
+                            ShimState.overrideClosed = state == 0
                             ShimState.lastCallbackResult = "activated"
                         }
                         "onRequestSuspended" -> {
@@ -294,6 +338,7 @@ object DirectStateController {
                         }
                         else -> return null
                     }
+                    ShimState.directConfirmationPending = false
                     Log.i(Config.TAG, "DeviceStateRequest.Callback.${method.name}")
                     ShimState.changed()
                 }
@@ -313,17 +358,21 @@ object DirectStateController {
      * Try to register a DeviceStateCallback for displaying current state.
      * Non-critical: silently fails if the method is unavailable.
      */
+    @Synchronized
     fun tryRegisterCallback(context: Context) {
-        if (!initialized || stateCallbackClassRef == null) return
+        if (stateCallbackRegistered || !available(context) || stateCallbackClassRef == null) return
         try {
             val manager = getManagerInstance(context)
             if (manager == null) return
             val executor = handlerExecutor(Looper.getMainLooper())
+            val callback = createStateCallbackProxy()
             managerClassRef!!.getMethod(
                 "registerCallback",
                 Executor::class.java,
                 stateCallbackClassRef!!
-            ).invoke(manager, executor, createStateCallbackProxy())
+            ).invoke(manager, executor, callback)
+            stateCallback = callback
+            stateCallbackRegistered = true
             Log.i(Config.TAG, "DeviceStateCallback registered")
         } catch (e: NoSuchMethodException) {
             Log.i(Config.TAG, "registerCallback not available on this DeviceStateManager")
@@ -340,7 +389,19 @@ object DirectStateController {
                     "equals" -> return proxy === args?.getOrNull(0)
                     "toString" -> return proxy.javaClass.name
                 }
-                Log.i(Config.TAG, "DeviceStateCallback.${method.name} called")
+                if (method.name == "onDeviceStateChanged" || method.name == "onStateChanged") {
+                    val state = args?.getOrNull(0)
+                    val identifier = when (state) {
+                        is Int -> state
+                        null -> null
+                        else -> state.javaClass.getMethod("getIdentifier").invoke(state) as Int
+                    }
+                    synchronized(this@DirectStateController) {
+                        ShimState.directCurrentState = identifier
+                        ShimState.directUnrequestedState = identifier.takeUnless { hasRequest }
+                    }
+                    ShimState.changed()
+                }
                 return null
             }
         }

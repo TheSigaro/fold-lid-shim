@@ -71,6 +71,18 @@
         </activity>
 
         <service
+            android:name=".FoldConfirmAccessibilityService"
+            android:label="@string/accessibility_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data android:name="android.accessibilityservice"
+                android:resource="@xml/fold_confirm_accessibility" />
+        </service>
+
+        <service
             android:name=".FoldService"
             android:exported="false"
             android:foregroundServiceType="specialUse">

@@ -10,7 +10,7 @@
     <string name="btn_request_permission">Выдать разрешение</string>
 
     <string name="mode_label">Режим работы:</string>
-    <string name="mode_direct">Прямой (нужно подтверждать на экране)</string>
+    <string name="mode_direct">Прямой (без Shizuku)</string>
     <string name="mode_shizuku">Shizuku (по умолчанию)</string>
 
     <string name="overlay_status">Поверх других приложений: %1$s</string>
@@ -70,4 +70,9 @@
     <string name="start_shizuku_now">Запустить Shizuku сейчас</string>
     <string name="disable_adb">Выключать беспроводную отладку после запуска</string>
     <string name="autostart_status">Ключ adb: %1$s\nWRITE_SECURE_SETTINGS: %2$s\nadb shell pm grant dev.pavlov.foldlidshim android.permission.WRITE_SECURE_SETTINGS\nПоследняя попытка: %3$s</string>
+    <string name="accessibility_label">FoldLidShim - подтверждение экрана</string>
+    <string name="accessibility_description">Подтверждает только системный диалог переключения экрана при незавершённом запросе FoldLidShim в прямом режиме и включённой службе.</string>
+    <string name="accessibility_status">Автоподтверждение: %1$s</string>
+    <string name="accessibility_settings">Включить в настройках</string>
+    <string name="direct_explanation">Разрешите показ поверх других приложений и включите автоподтверждение. Диалог системы мелькнёт на долю секунды и будет подтверждён автоматически. Shizuku и Wi-Fi не нужны.</string>
 </resources>

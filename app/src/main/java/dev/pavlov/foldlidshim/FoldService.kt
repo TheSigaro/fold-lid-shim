@@ -43,13 +43,19 @@ class FoldService : Service() {
                 updateHallDiagnosis()
                 evaluate()
                 publish(force = true)
+            } else {
+                observeDeviceState()
+                evaluate()
+                publish(force = true)
             }
             handler.postDelayed(this, 30_000)
         }
     }
 
     private fun observeDeviceState() {
-        hall.observe(ShizukuBridge.readDeviceState()?.baseState)
+        if (currentMode == Prefs.MODE_DIRECT) {
+            if (!DirectStateController.hasRequest) hall.observe(ShimState.directUnrequestedState)
+        } else hall.observe(ShizukuBridge.readDeviceState()?.baseState)
         updateHallDiagnosis()
     }
 
@@ -76,7 +82,13 @@ class FoldService : Service() {
     }
     private val stateListener = Runnable {
         handler.post {
-            if (!stopping) publish(force = true, notifyState = false)
+            if (!stopping) {
+                if (currentMode == Prefs.MODE_DIRECT) {
+                    if (!DirectStateController.hasRequest) hall.observe(ShimState.directUnrequestedState)
+                    updateHallDiagnosis()
+                }
+                publish(force = true, notifyState = false)
+            }
         }
     }
 
@@ -103,7 +115,9 @@ class FoldService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        ShimState.serviceRunning = true
         currentMode = Prefs.getMode(this)
+        if (currentMode == Prefs.MODE_DIRECT) DirectStateController.tryRegisterCallback(applicationContext)
         loadThresholds()
         notificationManager = getSystemService(NotificationManager::class.java)
         notificationManager.createNotificationChannel(
@@ -176,6 +190,7 @@ class FoldService : Service() {
             if (currentMode == Prefs.MODE_SHIZUKU) ShizukuBridge.removeListener(bridgeListener)
             stopAutoStarter()
             currentMode = newMode
+            if (currentMode == Prefs.MODE_DIRECT) DirectStateController.tryRegisterCallback(applicationContext)
             decider.reset()
             if (currentMode == Prefs.MODE_SHIZUKU) {
                 ShizukuBridge.addListener(bridgeListener)
@@ -200,6 +215,8 @@ class FoldService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        ShimState.serviceRunning = false
+        ShimState.directConfirmationPending = false
         stopAutoStarter()
         ShimState.removeListener(stateListener)
         handler.post {
@@ -288,10 +305,7 @@ class FoldService : Service() {
         if (decision != Decision.None) wakeLock.acquire(Config.WAKELOCK_MS)
         when (decision) {
             Decision.RequestClosed -> {
-                if (currentMode == Prefs.MODE_DIRECT && DirectStateController.hasRequest) {
-                    // An already accepted request can be suspended; do not submit it twice.
-                    decider.onApplied(closed = true, ok = true)
-                } else applyState(closed = true)
+                applyState(closed = true)
             }
             Decision.RequestOpen -> applyState(closed = false)
             Decision.None -> Unit
@@ -323,7 +337,6 @@ class FoldService : Service() {
         // hasRequest means accepted (possibly suspended), and still needs cancellation.
         val applied = success || (closed && DirectStateController.hasRequest)
         decider.onApplied(closed, applied)
-        if (success && !closed) ShimState.overrideClosed = false
         if (!success) {
             ShimState.lastCallbackResult = error ?: "direct action failed"
         }
@@ -336,6 +349,11 @@ class FoldService : Service() {
     private fun applyState(closed: Boolean): Boolean {
         if (currentMode == Prefs.MODE_DIRECT) {
             if (pendingAction != null) return false
+            if (DirectPolicy.decide(closed, ShimState.directCurrentState,
+                    DirectStateController.hasClosedRequest) == DirectPolicy.Command.NONE) {
+                decider.onApplied(closed, true)
+                return true
+            }
             val id = UUID.randomUUID().toString()
             pendingAction = if (closed) StateActivity.ACTION_CLOSED else StateActivity.ACTION_OPEN
             pendingId = id

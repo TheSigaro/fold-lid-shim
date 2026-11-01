@@ -6,6 +6,12 @@ import java.util.concurrent.CopyOnWriteArrayList
 
 /** Process-wide state shown by the UI; written by FoldService. */
 object ShimState {
+    @Volatile var serviceRunning = false
+    @Volatile var directCurrentState: Int? = null
+    /** Current-state sample received while no direct request belonged to us. */
+    @Volatile var directUnrequestedState: Int? = null
+    @Volatile var directConfirmationPending = false
+    @Volatile var directRequestGeneration = 0L
     @Volatile var hallDiagnosis = HallDiagnosis.Result.UNKNOWN
     @Volatile var autoStartAttempt: AutoStartAttempt? = null
     @Volatile var decision: String = "Служба не запущена"

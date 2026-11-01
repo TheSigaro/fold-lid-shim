@@ -163,6 +163,13 @@ class MainActivity : androidx.appcompat.app.AppCompatActivity() {
                 addCategory(Intent.CATEGORY_OPENABLE)
             }, REQUEST_IMPORT)
         }
+        findViewById<Button>(R.id.btnAccessibility).setOnClickListener {
+            try {
+                startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+            } catch (_: ActivityNotFoundException) {
+                Toast.makeText(this, R.string.overlay_settings_not_found, Toast.LENGTH_SHORT).show()
+            }
+        }
         findViewById<Button>(R.id.btnForceOpen).setOnClickListener { forceState(false) }
         findViewById<Button>(R.id.btnForceClose).setOnClickListener { forceState(true) }
         findViewById<Button>(R.id.btnOpenShizuku).setOnClickListener {
@@ -190,7 +197,9 @@ class MainActivity : androidx.appcompat.app.AppCompatActivity() {
         super.onStart()
         restartDebugSensors()
         ShizukuBridge.addListener(bridgeListener)
-        Thread { ShizukuBridge.readDeviceState(); main.post { refresh() } }.start()
+        if (Prefs.getMode(this) == Prefs.MODE_DIRECT) {
+            DirectStateController.tryRegisterCallback(applicationContext)
+        } else Thread { ShizukuBridge.readDeviceState(); main.post { refresh() } }.start()
         main.post(tick)
     }
 
@@ -216,6 +225,7 @@ class MainActivity : androidx.appcompat.app.AppCompatActivity() {
         Prefs.setMode(this, newMode)
 
         if (newMode == Prefs.MODE_SHIZUKU) ShizukuBridge.ensureBound()
+        else DirectStateController.tryRegisterCallback(applicationContext)
 
         if (isServiceRunning()) FoldService.reload(this)
         refresh()
@@ -245,6 +255,8 @@ class MainActivity : androidx.appcompat.app.AppCompatActivity() {
             dev.pavlov.foldlidshim.adb.AdbIdentity.status(this),
             if (ShizukuAutoStarter.hasSecureSettings(this)) "есть" else "нет",
             attempt?.let { "${java.text.DateFormat.getDateTimeInstance().format(java.util.Date(it.timeMs))}: ${it.stage}${it.error?.let { error -> ": $error" }.orEmpty()}" } ?: "Попыток ещё не было")
+        findViewById<TextView>(R.id.tvAccessibility).text = getString(R.string.accessibility_status,
+            if (FoldConfirmAccessibilityService.isEnabled(this)) "включено" else "выключено")
         val mode = Prefs.getMode(this)
         val status = ShizukuBridge.status(this)
         if (status == ShizukuStatus.READY && mode == Prefs.MODE_SHIZUKU) ShizukuBridge.ensureBound()
@@ -254,8 +266,8 @@ class MainActivity : androidx.appcompat.app.AppCompatActivity() {
         btnPermission.visibility = if (status == ShizukuStatus.NO_PERMISSION) View.VISIBLE else View.GONE
         btnPermission.isEnabled = status == ShizukuStatus.NO_PERMISSION
         btnTest.isEnabled = mode == Prefs.MODE_DIRECT || status == ShizukuStatus.READY
-        findViewById<Button>(R.id.btnForceOpen).isEnabled = status == ShizukuStatus.READY
-        findViewById<Button>(R.id.btnForceClose).isEnabled = status == ShizukuStatus.READY
+        findViewById<Button>(R.id.btnForceOpen).isEnabled = mode == Prefs.MODE_DIRECT || status == ShizukuStatus.READY
+        findViewById<Button>(R.id.btnForceClose).isEnabled = mode == Prefs.MODE_DIRECT || status == ShizukuStatus.READY
         val diagnosis = ShimState.hallDiagnosis
         findViewById<TextView>(R.id.tvHall).text = "Датчик Холла: ${diagnosis.label}"
         findViewById<TextView>(R.id.tvAction).text = when {
@@ -275,7 +287,8 @@ class MainActivity : androidx.appcompat.app.AppCompatActivity() {
             R.string.angle_label,
             if (angle == null) getString(R.string.angle_unknown) else getString(R.string.angle_value, angle)
         )
-        tvState.text = when (ShizukuBridge.currentState.takeIf { mode == Prefs.MODE_SHIZUKU }) {
+        val currentState = if (mode == Prefs.MODE_DIRECT) ShimState.directCurrentState else ShizukuBridge.currentState
+        tvState.text = when (currentState) {
             0 -> "Закрыт"
             2, 3 -> "Открыт"
             1 -> "Между порогами"
@@ -411,14 +424,8 @@ class MainActivity : androidx.appcompat.app.AppCompatActivity() {
 
     private fun runDirectTest() {
         Toast.makeText(this, R.string.test_started_direct, Toast.LENGTH_SHORT).show()
-        Thread {
-            val result = DirectStateController.requestClosed(this)
-            val errorMsg = ShimState.lastCallbackResult
-            reportDirect(if (result) "success" else "failed: ${errorMsg ?: "unknown error"}")
-            Thread.sleep(3000)
-            val cancelOk = DirectStateController.cancel(this)
-            reportDirect(if (cancelOk) "reset success" else "reset failed: ${ShimState.lastCallbackResult ?: "unknown"}")
-        }.start()
+        StateActivity.launch(this, true)
+        main.postDelayed({ StateActivity.launch(this, false) }, 3000L)
     }
 
     private fun runShizukuTest() {
@@ -464,6 +471,10 @@ class MainActivity : androidx.appcompat.app.AppCompatActivity() {
     }
 
     private fun forceState(closed: Boolean) {
+        if (Prefs.getMode(this) == Prefs.MODE_DIRECT) {
+            StateActivity.launch(this, closed)
+            return
+        }
         Thread {
             val arg = if (closed) Config.ARG_CLOSED else Config.ARG_OPENED
             report(arg, ShizukuBridge.exec(arg, 1500))

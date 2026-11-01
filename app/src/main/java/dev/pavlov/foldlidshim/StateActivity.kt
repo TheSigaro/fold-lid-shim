@@ -9,6 +9,8 @@ import android.os.SystemClock
 import android.os.Looper
 import android.util.Log
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.UUID
+import android.content.Context
 
 /**
  * Transparent activity used to make DeviceStateManager requests from a foreground context.
@@ -31,6 +33,23 @@ class StateActivity : Activity() {
         fun registerAction(id: String) = synchronized(actionLock) { activeId = id }
         fun abandonAction(id: String) = synchronized(actionLock) {
             if (activeId == id) activeId = null
+        }
+
+        fun launch(context: Context, closed: Boolean) {
+            val id = UUID.randomUUID().toString()
+            registerAction(id)
+            try {
+                context.startActivity(Intent(context, StateActivity::class.java).apply {
+                    putExtra(EXTRA_ACTION, if (closed) ACTION_CLOSED else ACTION_OPEN)
+                    putExtra(EXTRA_ID, id)
+                    putExtra(EXTRA_DEADLINE, SystemClock.elapsedRealtime() + FOCUS_TIMEOUT_MS)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                })
+            } catch (e: Exception) {
+                abandonAction(id)
+                ShimState.lastCallbackResult = "StateActivity: ${e.message}"
+                ShimState.changed()
+            }
         }
 
         const val EXTRA_ACTION = "action"
@@ -72,6 +91,7 @@ class StateActivity : Activity() {
             return
         }
 
+        handler.removeCallbacks(focusTimeoutRunnable)
         Log.i(Config.TAG, "StateActivity: window gained focus, executing request")
         val action = intent?.getStringExtra(EXTRA_ACTION) ?: ACTION_CLOSED
         executeAndFinish(action)
@@ -89,8 +109,8 @@ class StateActivity : Activity() {
                 } else {
                     activeId = null
                     success = when (action) {
-                        ACTION_CLOSED -> DirectStateController.requestClosed(this)
-                        ACTION_OPEN -> DirectStateController.cancel(this)
+                        ACTION_CLOSED -> DirectStateController.applyDesired(this, true)
+                        ACTION_OPEN -> DirectStateController.applyDesired(this, false)
                         else -> false
                     }
                     if (!success) error = ShimState.lastCallbackResult ?: "direct action failed"
@@ -103,8 +123,11 @@ class StateActivity : Activity() {
         report(success, error)
 
         // Finish after a short delay to ensure the system processes the state change
-        handler.postDelayed({
-            finish()
+        handler.postDelayed(object : Runnable {
+            override fun run() {
+                if (ShimState.directConfirmationPending) handler.postDelayed(this, 50L)
+                else finish()
+            }
         }, FINISH_DELAY_MS)
     }
 

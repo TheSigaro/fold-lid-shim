@@ -1,5 +1,9 @@
 package dev.pavlov.foldlidshim
 
+import android.app.PendingIntent
+import android.content.Intent
+import android.os.SystemClock
+import java.util.UUID
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
 import android.os.Handler
@@ -17,8 +21,12 @@ class FoldTileService : TileService() {
         listening = true
         ShizukuBridge.addListener(changed)
         ShimState.addListener(changed)
-        ShizukuBridge.ensureBound()
-        worker.execute { ShizukuBridge.readDeviceState(1500); main.post { update() } }
+        if (Prefs.getMode(this) == Prefs.MODE_DIRECT) {
+            DirectStateController.tryRegisterCallback(applicationContext)
+        } else {
+            ShizukuBridge.ensureBound()
+            worker.execute { ShizukuBridge.readDeviceState(1500); main.post { update() } }
+        }
         update()
     }
 
@@ -31,11 +39,13 @@ class FoldTileService : TileService() {
 
     private fun update() {
         if (!listening) return
-        val ready = ShizukuBridge.status(this) == ShizukuStatus.READY
-        val actualState = ShizukuBridge.currentState
+        val direct = Prefs.getMode(this) == Prefs.MODE_DIRECT
+        val ready = if (direct) DirectStateController.available(this)
+            else ShizukuBridge.status(this) == ShizukuStatus.READY
+        val actualState = if (direct) ShimState.directCurrentState else ShizukuBridge.currentState
         qsTile?.apply {
             label = "Экран Fold"
-            subtitle = if (!ready) "Shizuku не готов" else when (actualState) {
+            subtitle = if (!ready) { if (direct) "DeviceStateManager недоступен" else "Shizuku не готов" } else when (actualState) {
                 0 -> "Закрыт"
                 2, 3 -> "Открыт"
                 1 -> "Между порогами"
@@ -49,6 +59,20 @@ class FoldTileService : TileService() {
 
     override fun onClick() {
         super.onClick()
+        if (Prefs.getMode(this) == Prefs.MODE_DIRECT) {
+            val id = UUID.randomUUID().toString()
+            StateActivity.registerAction(id)
+            val intent = Intent(this, StateActivity::class.java).apply {
+                putExtra(StateActivity.EXTRA_ACTION, if (ShimState.directCurrentState == 0 ||
+                    DirectStateController.hasClosedRequest) StateActivity.ACTION_OPEN else StateActivity.ACTION_CLOSED)
+                putExtra(StateActivity.EXTRA_ID, id)
+                putExtra(StateActivity.EXTRA_DEADLINE, SystemClock.elapsedRealtime() + 3000L)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            startActivityAndCollapse(PendingIntent.getActivity(this, 0, intent,
+                PendingIntent.FLAG_CANCEL_CURRENT or PendingIntent.FLAG_IMMUTABLE))
+            return
+        }
         if (ShizukuBridge.status(this) != ShizukuStatus.READY) { update(); return }
         worker.execute {
             if (ShizukuBridge.readDeviceState(1500) == null) {

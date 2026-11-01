@@ -1,9 +1,11 @@
 [versions]
 agp = "8.9.2"
+hiddenapibypass = "6.1"
 kotlin = "2.1.21"
 shizuku = "13.1.5"
 
 [libraries]
+hiddenapibypass = { group = "org.lsposed.hiddenapibypass", name = "hiddenapibypass", version.ref = "hiddenapibypass" }
 shizuku-api = { group = "dev.rikka.shizuku", name = "api", version.ref = "shizuku" }
 shizuku-provider = { group = "dev.rikka.shizuku", name = "provider", version.ref = "shizuku" }
 

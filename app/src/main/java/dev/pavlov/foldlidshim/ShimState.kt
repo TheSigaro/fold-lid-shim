@@ -8,6 +8,8 @@ import java.util.concurrent.CopyOnWriteArrayList
 object ShimState {
     @Volatile var angle: Float? = null
     @Volatile var overrideClosed: Boolean = false
+    /** Last callback result from direct mode: "activated", "suspended", "canceled", or null. */
+    @Volatile var lastCallbackResult: String? = null
 
     private val listeners = CopyOnWriteArrayList<Runnable>()
     private val main = Handler(Looper.getMainLooper())

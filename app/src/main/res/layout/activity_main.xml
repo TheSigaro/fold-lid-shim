@@ -11,10 +11,40 @@
         android:orientation="vertical"
         android:padding="16dp">
 
+        <!-- Mode selection -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/mode_label"
+            android:textSize="18sp" />
+
+        <RadioGroup
+            android:id="@+id/rgMode"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <RadioButton
+                android:id="@+id/rbDirect"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/mode_direct" />
+
+            <RadioButton
+                android:id="@+id/rbShizuku"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/mode_shizuku" />
+        </RadioGroup>
+
+        <!-- Shizuku status (visible only in shizuku mode) -->
         <TextView
             android:id="@+id/tvShizuku"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
             android:textSize="18sp" />
 
         <Button
@@ -23,6 +53,38 @@
             android:layout_height="wrap_content"
             android:text="@string/btn_request_permission" />
 
+        <!-- Overlay permission status -->
+        <TextView
+            android:id="@+id/tvOverlay"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:textSize="18sp" />
+
+        <Button
+            android:id="@+id/btnOverlay"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/btn_overlay_permission" />
+
+        <!-- DSM status (visible only in direct mode) -->
+        <TextView
+            android:id="@+id/tvDsmStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:textSize="18sp" />
+
+        <!-- Overall status text (test results, errors) -->
+        <TextView
+            android:id="@+id/tvStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:textSize="14sp"
+            android:textColor="?android:attr/textColorSecondary" />
+
+        <!-- Sensor info -->
         <TextView
             android:id="@+id/tvSensor"
             android:layout_width="match_parent"

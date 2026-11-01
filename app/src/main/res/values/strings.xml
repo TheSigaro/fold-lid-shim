@@ -9,6 +9,19 @@
     <string name="shizuku_ready">готов</string>
     <string name="btn_request_permission">Запросить разрешение Shizuku</string>
 
+    <string name="mode_label">Режим работы:</string>
+    <string name="mode_direct">Прямой (по умолчанию)</string>
+    <string name="mode_shizuku">Shizuku</string>
+
+    <string name="overlay_status">Поверх других приложений: %1$s</string>
+    <string name="overlay_yes">да</string>
+    <string name="overlay_no">нет</string>
+    <string name="btn_overlay_permission">Запросить разрешение поверх других</string>
+    <string name="overlay_settings_not_found">Настройки не найдены</string>
+
+    <string name="dsm_status_available">DeviceStateManager: доступен</string>
+    <string name="dsm_status_unavailable">DeviceStateManager: недоступен</string>
+
     <string name="sensor_label">Датчик шарнира: %1$s</string>
     <string name="sensor_present">есть</string>
     <string name="sensor_absent">нет</string>
@@ -29,6 +42,7 @@
 
     <string name="btn_test_now">Проверить сейчас</string>
     <string name="test_started">state 0, через 3 секунды state reset</string>
+    <string name="test_started_direct">Прямой режим: запрос состояния</string>
     <string name="test_unavailable">Shizuku не готов</string>
     <string name="test_result">state %1$s: код %2$d</string>
     <string name="test_failed">state %1$s: не выполнено</string>

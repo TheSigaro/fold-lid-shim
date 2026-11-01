@@ -6,6 +6,7 @@ import android.content.SharedPreferences
 object Prefs {
     private const val NAME = "foldlidshim"
     private const val KEY_ENABLED = "enabled"
+    private const val KEY_MODE = "mode"
     private const val KEY_CLOSE = "close_deg"
     private const val KEY_OPEN = "open_deg"
 
@@ -16,6 +17,17 @@ object Prefs {
 
     fun setEnabled(context: Context, value: Boolean) {
         sp(context).edit().putBoolean(KEY_ENABLED, value).apply()
+    }
+
+    const val MODE_DIRECT = "direct"
+    const val MODE_SHIZUKU = "shizuku"
+
+    fun getMode(context: Context): String =
+        sp(context).getString(KEY_MODE, MODE_DIRECT) ?: MODE_DIRECT
+
+    fun setMode(context: Context, mode: String) {
+        val valid = if (mode == MODE_DIRECT || mode == MODE_SHIZUKU) true else false
+        if (valid) sp(context).edit().putString(KEY_MODE, mode).apply()
     }
 
     fun closeDeg(context: Context): Float = thresholds(context).first

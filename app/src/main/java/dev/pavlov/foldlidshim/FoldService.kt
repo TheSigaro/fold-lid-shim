@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.hardware.Sensor
 import android.hardware.SensorEvent
@@ -34,6 +35,10 @@ class FoldService : Service(), SensorEventListener {
     private var resetConfirmed = false
     private var lastNotifText = ""
     private var lastNotifAt = 0L
+    private var currentMode = Prefs.MODE_DIRECT
+
+    // Track pending StateActivity action to handle its result properly
+    private var pendingAction: String? = null
 
     private val holdRunnable = Runnable {
         holdPending = false
@@ -55,6 +60,7 @@ class FoldService : Service(), SensorEventListener {
 
     override fun onCreate() {
         super.onCreate()
+        currentMode = Prefs.getMode(this)
         notificationManager = getSystemService(NotificationManager::class.java)
         notificationManager.createNotificationChannel(
             NotificationChannel(CHANNEL_ID, getString(R.string.notif_channel), NotificationManager.IMPORTANCE_LOW)
@@ -72,8 +78,12 @@ class FoldService : Service(), SensorEventListener {
             setReferenceCounted(false)
         }
 
-        ShizukuBridge.addListener(bridgeListener)
-        ShizukuBridge.ensureBound()
+        if (currentMode == Prefs.MODE_SHIZUKU) {
+            ShizukuBridge.addListener(bridgeListener)
+            ShizukuBridge.ensureBound()
+        } else {
+            Log.i(Config.TAG, "Running in direct mode, Shizuku not needed")
+        }
 
         sensorManager = getSystemService(SensorManager::class.java)
         sensor = sensorManager?.getDefaultSensor(Sensor.TYPE_HINGE_ANGLE)
@@ -82,22 +92,39 @@ class FoldService : Service(), SensorEventListener {
             Log.w(Config.TAG, "TYPE_HINGE_ANGLE sensor not found")
         } else {
             sensorManager?.registerListener(this, s, SensorManager.SENSOR_DELAY_NORMAL, 0, handler)
-            Log.i(Config.TAG, "Service started, hinge sensor registered")
+            Log.i(Config.TAG, "Service started, hinge sensor registered (mode=$currentMode)")
         }
         handler.post { publish(force = true) }
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int) = START_STICKY
+
+    override fun onNewIntent(intent: Intent?) {
+        // Handle intents delivered via singleInstance in direct mode
+        if (currentMode == Prefs.MODE_DIRECT && intent != null) {
+            val action = intent.getStringExtra(StateActivity.EXTRA_ACTION)
+            if (action != null) {
+                handleDirectAction(action)
+            }
+        }
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
         sensorManager?.unregisterListener(this)
-        ShizukuBridge.removeListener(bridgeListener)
+        if (currentMode == Prefs.MODE_SHIZUKU) {
+            ShizukuBridge.removeListener(bridgeListener)
+        }
         handler.removeCallbacksAndMessages(null)
         if (ShimState.overrideClosed) {
             val resetThread = Thread {
-                if (ShizukuBridge.exec(Config.ARG_RESET, 2000)?.code == 0) {
+                val success = if (currentMode == Prefs.MODE_DIRECT) {
+                    DirectStateController.cancel(this)
+                } else {
+                    ShizukuBridge.exec(Config.ARG_RESET, 2000)?.code == 0
+                }
+                if (success) {
                     Log.i(Config.TAG, "State change: CLOSED -> OPEN (service stopped)")
                     ShimState.overrideClosed = false
                 }
@@ -132,7 +159,16 @@ class FoldService : Service(), SensorEventListener {
         when {
             angle >= open -> {
                 cancelHold()
-                if ((ShimState.overrideClosed || !resetConfirmed) && applyState(closed = false)) resetConfirmed = true
+                // If we have a pending action, let StateActivity result handle it
+                if (pendingAction == null && !ShimState.overrideClosed && !resetConfirmed) {
+                    // No override and never reset - this is the first time opening
+                    applyState(closed = false)
+                    resetConfirmed = true
+                } else if (ShimState.overrideClosed && pendingAction == null) {
+                    // Already overridden, need to cancel
+                    applyState(closed = false)
+                    resetConfirmed = true
+                }
             }
             angle <= close -> {
                 if (!ShimState.overrideClosed && !holdPending) {
@@ -152,17 +188,70 @@ class FoldService : Service(), SensorEventListener {
         }
     }
 
+    /**
+     * Handle a direct mode action delivered via onNewIntent.
+     */
+    private fun handleDirectAction(action: String) {
+        Log.i(Config.TAG, "FoldService: handling direct action=$action")
+        val closed = (action == StateActivity.ACTION_CLOSED)
+        val success = if (closed) {
+            DirectStateController.requestClosed(this)
+        } else {
+            DirectStateController.cancel(this)
+        }
+        if (success && closed) {
+            ShimState.overrideClosed = true
+            ShimState.lastCallbackResult = "activated"
+        } else if (!closed) {
+            ShimState.overrideClosed = false
+            ShimState.lastCallbackResult = if (success) "canceled" else null
+        } else if (!success) {
+            ShimState.lastCallbackResult = ShimState.lastCallbackResult ?: "failed"
+        }
+    }
+
     private fun applyState(closed: Boolean): Boolean {
+        if (currentMode == Prefs.MODE_DIRECT) {
+            try {
+                pendingAction = if (closed) StateActivity.ACTION_CLOSED else StateActivity.ACTION_OPEN
+                val intent = Intent(this, StateActivity::class.java).apply {
+                    putExtra(StateActivity.EXTRA_ACTION, if (closed) StateActivity.ACTION_CLOSED else StateActivity.ACTION_OPEN)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                startActivity(intent)
+                Log.i(Config.TAG, "Direct mode: launched StateActivity for ${if (closed) "CLOSED" else "OPEN"}")
+                // overrideClosed will be set by StateActivity on callback
+                return true
+            } catch (e: Exception) {
+                Log.e(Config.TAG, "Direct mode: failed to launch StateActivity: ${e.message}", e)
+                pendingAction = null
+                return false
+            }
+        }
+
         val arg = if (closed) Config.ARG_CLOSED else Config.ARG_RESET
         val result = ShizukuBridge.exec(arg, 1500)
         if (result != null && result.code == 0) {
             ShimState.overrideClosed = closed
-            Log.i(Config.TAG, "State change: ${if (closed) "OPEN -> CLOSED" else "CLOSED -> OPEN"} angle=$lastAngle")
+            Log.i(Config.TAG, "Shizuku mode state change: ${if (closed) "OPEN -> CLOSED" else "CLOSED -> OPEN"} angle=$lastAngle")
         } else {
-            Log.w(Config.TAG, "State change to ${if (closed) "CLOSED" else "OPEN"} not applied, result=$result")
+            Log.w(Config.TAG, "Shizuku mode state change to ${if (closed) "CLOSED" else "OPEN"} not applied, result=$result")
         }
         ShimState.changed()
         return result != null && result.code == 0
+    }
+
+    /**
+     * Called when a direct mode cancel actually completes.
+     */
+    private fun onDirectCancelCompleted(success: Boolean) {
+        pendingAction = null
+        if (success) {
+            ShimState.overrideClosed = false
+            ShimState.lastCallbackResult = "canceled"
+            resetConfirmed = true
+            ShimState.changed()
+        }
     }
 
     private fun releaseWakeLock() {
@@ -174,12 +263,18 @@ class FoldService : Service(), SensorEventListener {
 
     private fun publish(force: Boolean) {
         ShimState.changed()
-        val status = ShizukuBridge.status(this)
         val angle = lastAngle
         val text = when {
             sensor == null -> getString(R.string.notif_no_sensor)
-            status != ShizukuStatus.READY ->
-                getString(R.string.notif_waiting_shizuku, shizukuText(status))
+            currentMode == Prefs.MODE_DIRECT ->
+                if (angle == null) getString(R.string.notif_waiting_angle, overrideText())
+                else getString(
+                    R.string.notif_status,
+                    getString(R.string.angle_value, angle),
+                    overrideText()
+                )
+            ShizukuBridge.status(this) != ShizukuStatus.READY ->
+                getString(R.string.notif_waiting_shizuku, shizukuText(ShizukuBridge.status(this)))
             angle == null -> getString(R.string.notif_waiting_angle, overrideText())
             else -> getString(
                 R.string.notif_status,

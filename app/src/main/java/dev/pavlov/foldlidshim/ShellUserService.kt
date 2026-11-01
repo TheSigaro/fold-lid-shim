@@ -14,7 +14,7 @@ class ShellUserService : IShellService.Stub() {
     }
 
     override fun runDeviceState(arg: String): String {
-        if (arg != Config.ARG_CLOSED && arg != Config.ARG_RESET) {
+        if (arg != Config.ARG_CLOSED && arg != Config.ARG_OPENED && arg != Config.ARG_RESET) {
             return "exit=-2\nunsupported argument"
         }
         return try {

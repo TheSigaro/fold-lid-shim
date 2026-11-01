@@ -8,9 +8,6 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
-import android.hardware.Sensor
-import android.hardware.SensorEvent
-import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.os.Bundle
 import android.os.ResultReceiver
@@ -22,14 +19,20 @@ import android.os.SystemClock
 import android.util.Log
 import java.util.UUID
 
-class FoldService : Service(), SensorEventListener {
+class FoldService : Service() {
 
     private lateinit var thread: HandlerThread
     private lateinit var handler: Handler
     private lateinit var wakeLock: PowerManager.WakeLock
     private lateinit var notificationManager: NotificationManager
     private var sensorManager: SensorManager? = null
-    private var sensor: Sensor? = null
+    private var angleSensors: AngleSensors? = null
+    private var currentSource = Config.DEFAULT_SOURCE
+    private var currentInvert = booleanArrayOf(true, false, true)
+    private var forceOpened = true
+    private var shizukuOverrideActive = false
+    private val startupGate = StartupGate()
+    private var lastPublishAt = 0L
 
     // Touched only on the handler thread.
     private var lastAngle: Float? = null
@@ -94,14 +97,7 @@ class FoldService : Service(), SensorEventListener {
         }
 
         sensorManager = getSystemService(SensorManager::class.java)
-        sensor = sensorManager?.getDefaultSensor(Sensor.TYPE_HINGE_ANGLE)
-        val s = sensor
-        if (s == null) {
-            Log.w(Config.TAG, "TYPE_HINGE_ANGLE sensor not found")
-        } else {
-            sensorManager?.registerListener(this, s, SensorManager.SENSOR_DELAY_FASTEST, 0, handler)
-            Log.i(Config.TAG, "Service started, hinge sensor registered (mode=$currentMode)")
-        }
+        handler.post { registerAngleSource() }
         handler.post { publish(force = true) }
     }
 
@@ -123,7 +119,7 @@ class FoldService : Service(), SensorEventListener {
                 if (ShimState.overrideClosed || DirectStateController.hasRequest) {
                     DirectStateController.cancel(this)
                 } else true
-            } else if (ShimState.overrideClosed) {
+            } else if (shizukuOverrideActive || ShimState.overrideClosed) {
                 ShizukuBridge.exec(Config.ARG_RESET, 1500)?.code == 0
             } else true
             if (!success) {
@@ -132,6 +128,7 @@ class FoldService : Service(), SensorEventListener {
                 return
             }
             ShimState.overrideClosed = false
+            shizukuOverrideActive = false
             if (currentMode == Prefs.MODE_SHIZUKU) ShizukuBridge.removeListener(bridgeListener)
             currentMode = newMode
             decider.reset()
@@ -140,6 +137,16 @@ class FoldService : Service(), SensorEventListener {
                 ShizukuBridge.ensureBound()
             }
         }
+        val source = Prefs.angleSource(this)
+        val invert = Prefs.invertAxes(this)
+        if (source != currentSource || !invert.contentEquals(currentInvert)) {
+            registerAngleSource()
+        }
+        val newForceOpened = Prefs.forceOpened(this)
+        if (forceOpened != newForceOpened) {
+            forceOpened = newForceOpened
+            if (currentMode == Prefs.MODE_SHIZUKU) decider.reset()
+        }
         evaluate()
         publish(force = true)
     }
@@ -147,14 +154,14 @@ class FoldService : Service(), SensorEventListener {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
-        sensorManager?.unregisterListener(this)
         ShimState.removeListener(stateListener)
         handler.post {
             stopping = true
+            angleSensors?.stop()
             ShizukuBridge.removeListener(bridgeListener)
             cancelHold()
             clearPendingAction()
-            if (ShimState.overrideClosed ||
+            if (currentMode == Prefs.MODE_SHIZUKU || ShimState.overrideClosed ||
                 (currentMode == Prefs.MODE_DIRECT && DirectStateController.hasRequest)) {
                 val success = if (currentMode == Prefs.MODE_DIRECT) {
                     DirectStateController.cancel(this)
@@ -165,6 +172,7 @@ class FoldService : Service(), SensorEventListener {
                 else ShimState.lastCallbackResult = ShimState.lastCallbackResult ?: "stop: cancel failed"
             }
             ShimState.angle = null
+            ShimState.decision = "Служба остановлена"
             ShimState.changed()
             releaseWakeLock()
             handler.removeCallbacksAndMessages(null)
@@ -173,16 +181,36 @@ class FoldService : Service(), SensorEventListener {
         super.onDestroy()
     }
 
-    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
+    private fun registerAngleSource() {
+        angleSensors?.stop()
+        currentSource = Prefs.angleSource(this)
+        currentInvert = Prefs.invertAxes(this)
+        forceOpened = Prefs.forceOpened(this)
+        lastAngle = null
+        ShimState.angle = null
+        startupGate.reset()
+        ShimState.decision = "Ожидание 3 событий"
+        clearPendingAction()
+        decider.reset()
+        angleSensors = sensorManager?.let { manager ->
+            AngleSensors(manager, currentInvert, currentSource) { _, angle -> onAngle(angle) }
+                .also { it.start(handler) }
+        }
+    }
 
-    override fun onSensorChanged(event: SensorEvent) {
-        if (stopping || event.values.isEmpty()) return
-        val angle = event.values[0]
-        wakeLock.acquire(Config.WAKELOCK_MS)
+    private fun onAngle(angle: Float) {
+        if (stopping || !angle.isFinite()) return
         lastAngle = angle
         ShimState.angle = angle
+        startupGate.onAngle(angle)
+        if (!startupGate.ready) ShimState.decision = "Ожидание 3 событий: ${startupGate.eventCount}/3"
+        else if (ShimState.decision.startsWith("Ожидание")) ShimState.decision = "Между порогами"
         evaluate()
-        publish(force = false)
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastPublishAt >= 200) {
+            lastPublishAt = now
+            publish(force = false)
+        }
         if (decider.nextEvaluationMs == null) releaseWakeLock()
     }
 
@@ -192,11 +220,18 @@ class FoldService : Service(), SensorEventListener {
     }
 
     private fun evaluate() {
-        if (stopping) return
+        if (stopping || !startupGate.ready) return
         val angle = lastAngle ?: return
         // Feed every zone, even while an activity is pending, to cancel interrupted holds.
         // The decider suppresses pending commands. hasRequest must not block opening.
-        when (decider.onAngle(angle, SystemClock.elapsedRealtime())) {
+        val decision = decider.onAngle(angle, SystemClock.elapsedRealtime())
+        ShimState.decision = when (decision) {
+            Decision.RequestClosed -> "CLOSED"
+            Decision.RequestOpen -> "OPENED"
+            Decision.None -> ShimState.decision
+        }
+        if (decision != Decision.None) wakeLock.acquire(Config.WAKELOCK_MS)
+        when (decision) {
             Decision.RequestClosed -> {
                 if (currentMode == Prefs.MODE_DIRECT && DirectStateController.hasRequest) {
                     // An already accepted request can be suspended; do not submit it twice.
@@ -278,15 +313,17 @@ class FoldService : Service(), SensorEventListener {
             }
         }
 
-        val arg = if (closed) Config.ARG_CLOSED else Config.ARG_RESET
+        val arg = if (closed) Config.ARG_CLOSED
+            else if (forceOpened) Config.ARG_OPENED else Config.ARG_RESET
         val result = ShizukuBridge.exec(arg, 1500)
         val ok = result != null && result.code == 0
         decider.onApplied(closed, ok)
         if (ok) {
             ShimState.overrideClosed = closed
+            shizukuOverrideActive = arg != Config.ARG_RESET
             Log.i(Config.TAG, "Shizuku mode state change: ${if (closed) "OPEN -> CLOSED" else "CLOSED -> OPEN"} angle=$lastAngle")
         } else {
-            ShimState.lastCallbackResult = "Shizuku ${if (closed) "request" else "reset"} failed: $result"
+            ShimState.lastCallbackResult = "Shizuku $arg failed: $result"
             Log.w(Config.TAG, "Shizuku mode state change to ${if (closed) "CLOSED" else "OPEN"} not applied, result=$result")
         }
         ShimState.changed()
@@ -304,7 +341,7 @@ class FoldService : Service(), SensorEventListener {
         if (notifyState) ShimState.changed()
         val angle = lastAngle
         val text = when {
-            sensor == null -> getString(R.string.notif_no_sensor)
+            angleSensors?.available != true -> getString(R.string.notif_no_sensor)
             currentMode == Prefs.MODE_DIRECT ->
                 if (angle == null) getString(R.string.notif_waiting_angle, overrideText())
                 else getString(

@@ -6,6 +6,7 @@ import java.util.concurrent.CopyOnWriteArrayList
 
 /** Process-wide state shown by the UI; written by FoldService. */
 object ShimState {
+    @Volatile var decision: String = "Служба не запущена"
     @Volatile var angle: Float? = null
     @Volatile var overrideClosed: Boolean = false
     /** Last callback result from direct mode: "activated", "suspended", "canceled", or null. */

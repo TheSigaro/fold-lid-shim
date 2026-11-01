@@ -7,7 +7,6 @@ import android.app.AlertDialog
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.hardware.Sensor
 import android.hardware.SensorManager
 import android.net.Uri
 import android.os.Bundle
@@ -17,6 +16,7 @@ import android.util.Log
 import android.provider.Settings
 import android.view.View
 import android.view.WindowInsets
+import android.widget.CheckBox
 import android.widget.Button
 import android.widget.CompoundButton
 import android.widget.EditText
@@ -43,12 +43,13 @@ class MainActivity : Activity() {
     private lateinit var tvDsmStatus: TextView
     private lateinit var tvStatus: TextView
 
+    private var debugSensors: AngleSensors? = null
+
     private val main = Handler(Looper.getMainLooper())
-    private val refreshRunnable = Runnable { refresh() }
     private val tick = object : Runnable {
         override fun run() {
             refresh()
-            main.postDelayed(this, 1000)
+            main.postDelayed(this, 200)
         }
     }
 
@@ -116,6 +117,40 @@ class MainActivity : Activity() {
             applyModeChange(newMode)
         }
 
+        val sources = findViewById<RadioGroup>(R.id.rgSource)
+        sources.check(when (Prefs.angleSource(this)) {
+            Config.SOURCE_ACCEL -> R.id.rbAccel
+            Config.SOURCE_HINGE -> R.id.rbHinge
+            else -> R.id.rbSamsung
+        })
+        sources.setOnCheckedChangeListener { _, id ->
+            Prefs.setAngleSource(this, when (id) {
+                R.id.rbAccel -> Config.SOURCE_ACCEL
+                R.id.rbHinge -> Config.SOURCE_HINGE
+                else -> Config.SOURCE_SAMSUNG
+            })
+            if (isServiceRunning()) FoldService.reload(this)
+        }
+        findViewById<Switch>(R.id.swForceOpened).apply {
+            isChecked = Prefs.forceOpened(this@MainActivity)
+            setOnCheckedChangeListener { _, checked ->
+                Prefs.setForceOpened(this@MainActivity, checked)
+                if (isServiceRunning()) FoldService.reload(this@MainActivity)
+            }
+        }
+        val axes = Prefs.invertAxes(this)
+        listOf(R.id.cbInvertX, R.id.cbInvertY, R.id.cbInvertZ).forEachIndexed { index, id ->
+            findViewById<CheckBox>(id).apply {
+                isChecked = axes[index]
+                setOnCheckedChangeListener { _, checked ->
+                    axes[index] = checked
+                    Prefs.setInvertAxes(this@MainActivity, axes)
+                    restartDebugSensors()
+                    if (isServiceRunning()) FoldService.reload(this@MainActivity)
+                }
+            }
+        }
+
         Shizuku.addRequestPermissionResultListener(permissionListener)
 
         if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
@@ -125,13 +160,14 @@ class MainActivity : Activity() {
 
     override fun onStart() {
         super.onStart()
-        ShimState.addListener(refreshRunnable)
+        restartDebugSensors()
         main.post(tick)
     }
 
     override fun onStop() {
+        debugSensors?.stop()
+        debugSensors = null
         main.removeCallbacks(tick)
-        ShimState.removeListener(refreshRunnable)
         super.onStop()
     }
 
@@ -177,6 +213,12 @@ class MainActivity : Activity() {
         // Placeholder: ShizukuBridge handles its own state evaluation
     }
 
+    private fun restartDebugSensors() {
+        debugSensors?.stop()
+        debugSensors = AngleSensors(getSystemService(SensorManager::class.java), Prefs.invertAxes(this))
+            .also { it.start(main) }
+    }
+
     private fun refresh() {
         val mode = Prefs.getMode(this)
         val status = ShizukuBridge.status(this)
@@ -210,12 +252,8 @@ class MainActivity : Activity() {
             btnPermission.isEnabled = status == ShizukuStatus.NO_PERMISSION
         }
 
-        val hasSensor = getSystemService(SensorManager::class.java)
-            ?.getDefaultSensor(Sensor.TYPE_HINGE_ANGLE) != null
-        tvSensor.text = getString(
-            R.string.sensor_label,
-            getString(if (hasSensor) R.string.sensor_present else R.string.sensor_absent)
-        )
+        tvSensor.text = getString(R.string.sensor_debug,
+            debugSensors?.debugText().orEmpty(), ShimState.decision)
 
         val angle = ShimState.angle
         tvAngle.text = getString(
@@ -366,7 +404,8 @@ class MainActivity : Activity() {
         Thread {
             report(Config.ARG_CLOSED, ShizukuBridge.exec(Config.ARG_CLOSED, 5000))
             Thread.sleep(3000)
-            report(Config.ARG_RESET, ShizukuBridge.exec(Config.ARG_RESET, 5000))
+            val openArg = if (Prefs.forceOpened(this)) Config.ARG_OPENED else Config.ARG_RESET
+            report(openArg, ShizukuBridge.exec(openArg, 5000))
         }.start()
     }
 

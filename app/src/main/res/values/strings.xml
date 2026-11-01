@@ -41,7 +41,7 @@
     <string name="thresholds_invalid">Нужно: 0 &lt;= закрыто &lt; открыто &lt;= 180</string>
 
     <string name="btn_test_now">Проверить сейчас</string>
-    <string name="test_started">state 0, через 3 секунды state reset</string>
+    <string name="test_started">state 0, через 3 секунды раскрытие по настройке</string>
     <string name="test_started_direct">Прямой режим: запрос состояния</string>
     <string name="test_unavailable">Shizuku не готов</string>
     <string name="test_result">state %1$s: код %2$d</string>
@@ -52,7 +52,17 @@
     <string name="notif_channel">Состояние шарнира</string>
     <string name="notif_title">FoldLidShim</string>
     <string name="notif_waiting_shizuku">Ожидание Shizuku (%1$s)</string>
-    <string name="notif_no_sensor">Датчика шарнира нет</string>
+    <string name="notif_no_sensor">Датчики выбранного источника недоступны</string>
     <string name="notif_waiting_angle">Ожидание угла шарнира, override: %1$s</string>
     <string name="notif_status">Угол: %1$s, override: %2$s</string>
+    <string name="source_label">Источник угла</string>
+    <string name="source_samsung">samsung - Folding Angle (по умолчанию)</string>
+    <string name="source_accel">accel - два акселерометра</string>
+    <string name="source_hinge">hinge - TYPE_HINGE_ANGLE</string>
+    <string name="force_opened">Принудительное OPENED при раскрытии</string>
+    <string name="invert_sub">Инверсия осей sub</string>
+    <string name="axis_x">X</string>
+    <string name="axis_y">Y</string>
+    <string name="axis_z">Z</string>
+    <string name="sensor_debug">Датчики\n%1$s\nТекущее решение: %2$s</string>
 </resources>

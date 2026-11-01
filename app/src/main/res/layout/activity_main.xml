@@ -84,6 +84,28 @@
             android:textSize="14sp"
             android:textColor="?android:attr/textColorSecondary" />
 
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:text="@string/source_label" android:textSize="18sp" />
+        <RadioGroup android:id="@+id/rgSource" android:layout_width="match_parent"
+            android:layout_height="wrap_content">
+            <RadioButton android:id="@+id/rbSamsung" android:layout_width="match_parent"
+                android:layout_height="wrap_content" android:text="@string/source_samsung" />
+            <RadioButton android:id="@+id/rbAccel" android:layout_width="match_parent"
+                android:layout_height="wrap_content" android:text="@string/source_accel" />
+            <RadioButton android:id="@+id/rbHinge" android:layout_width="match_parent"
+                android:layout_height="wrap_content" android:text="@string/source_hinge" />
+        </RadioGroup>
+        <Switch android:id="@+id/swForceOpened" android:layout_width="match_parent"
+            android:layout_height="wrap_content" android:text="@string/force_opened" />
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:text="@string/invert_sub" />
+        <CheckBox android:id="@+id/cbInvertX" android:layout_width="match_parent"
+            android:layout_height="wrap_content" android:text="@string/axis_x" />
+        <CheckBox android:id="@+id/cbInvertY" android:layout_width="match_parent"
+            android:layout_height="wrap_content" android:text="@string/axis_y" />
+        <CheckBox android:id="@+id/cbInvertZ" android:layout_width="match_parent"
+            android:layout_height="wrap_content" android:text="@string/axis_z" />
+
         <!-- Sensor info -->
         <TextView
             android:id="@+id/tvSensor"

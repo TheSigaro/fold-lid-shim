@@ -42,6 +42,7 @@ kotlin {
 }
 
 dependencies {
+    testImplementation(libs.junit)
     implementation(libs.hiddenapibypass)
     implementation(libs.shizuku.api)
     implementation(libs.shizuku.provider)

@@ -44,7 +44,7 @@ object Prefs {
     }
 
     fun isValid(close: Float, open: Float): Boolean =
-        close >= 0f && close < open && open <= 180f
+        validateThresholds(close, open)
 
     fun setThresholds(context: Context, close: Float, open: Float): Boolean {
         if (!isValid(close, open)) return false

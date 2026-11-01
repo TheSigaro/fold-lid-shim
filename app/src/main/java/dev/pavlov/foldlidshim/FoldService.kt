@@ -33,8 +33,7 @@ class FoldService : Service(), SensorEventListener {
 
     // Touched only on the handler thread.
     private var lastAngle: Float? = null
-    private var holdPending = false
-    private var resetConfirmed = false
+    private val decider = FoldDecider()
     private var lastNotifText = ""
     private var lastNotifAt = 0L
     private var currentMode = Prefs.MODE_DIRECT
@@ -42,7 +41,6 @@ class FoldService : Service(), SensorEventListener {
     // Track pending StateActivity action to handle its result properly
     private var pendingAction: String? = null
     private var pendingId: String? = null
-    private var thresholds = Config.DEFAULT_CLOSE_DEG to Config.DEFAULT_OPEN_DEG
     private var stopping = false
     private val pendingTimeout = Runnable {
         completeDirectAction(false, "direct action timeout after 3000ms")
@@ -54,15 +52,9 @@ class FoldService : Service(), SensorEventListener {
     }
 
     private val holdRunnable = Runnable {
-        holdPending = false
-        val angle = lastAngle
-        val (close, _) = thresholds
-        if (angle != null && angle <= close && !ShimState.overrideClosed && pendingAction == null &&
-            (currentMode != Prefs.MODE_DIRECT || !DirectStateController.hasRequest)) {
-            applyState(closed = true)
-        }
+        evaluate()
         publish(force = true)
-        releaseWakeLock()
+        if (decider.nextEvaluationMs == null) releaseWakeLock()
     }
 
     private val bridgeListener = Runnable {
@@ -75,7 +67,7 @@ class FoldService : Service(), SensorEventListener {
     override fun onCreate() {
         super.onCreate()
         currentMode = Prefs.getMode(this)
-        thresholds = Prefs.thresholds(this)
+        loadThresholds()
         notificationManager = getSystemService(NotificationManager::class.java)
         notificationManager.createNotificationChannel(
             NotificationChannel(CHANNEL_ID, getString(R.string.notif_channel), NotificationManager.IMPORTANCE_LOW)
@@ -122,7 +114,7 @@ class FoldService : Service(), SensorEventListener {
 
     private fun handleReload() {
         cancelHold()
-        thresholds = Prefs.thresholds(this)
+        loadThresholds()
         val newMode = Prefs.getMode(this)
         if (newMode != currentMode) {
             // Invalidate before cancellation. The activity gate waits for an executing action.
@@ -142,7 +134,7 @@ class FoldService : Service(), SensorEventListener {
             ShimState.overrideClosed = false
             if (currentMode == Prefs.MODE_SHIZUKU) ShizukuBridge.removeListener(bridgeListener)
             currentMode = newMode
-            resetConfirmed = false
+            decider.reset()
             if (currentMode == Prefs.MODE_SHIZUKU) {
                 ShizukuBridge.addListener(bridgeListener)
                 ShizukuBridge.ensureBound()
@@ -191,49 +183,43 @@ class FoldService : Service(), SensorEventListener {
         ShimState.angle = angle
         evaluate()
         publish(force = false)
-        if (!holdPending) releaseWakeLock()
+        if (decider.nextEvaluationMs == null) releaseWakeLock()
+    }
+
+    private fun loadThresholds() {
+        val (close, open) = Prefs.thresholds(this)
+        decider.configure(close, open, Config.CLOSE_HOLD_MS)
     }
 
     private fun evaluate() {
         if (stopping) return
         val angle = lastAngle ?: return
-        val (close, open) = thresholds
-        when {
-            angle >= open -> {
-                cancelHold()
-                if (pendingAction == null && (ShimState.overrideClosed || !resetConfirmed ||
-                    (currentMode == Prefs.MODE_DIRECT && DirectStateController.hasRequest))) {
-                    if (applyState(closed = false) && currentMode == Prefs.MODE_SHIZUKU) {
-                        resetConfirmed = true
-                    }
-                }
+        // Feed every zone, even while an activity is pending, to cancel interrupted holds.
+        // The decider suppresses pending commands. hasRequest must not block opening.
+        when (decider.onAngle(angle, SystemClock.elapsedRealtime())) {
+            Decision.RequestClosed -> {
+                if (currentMode == Prefs.MODE_DIRECT && DirectStateController.hasRequest) {
+                    // An already accepted request can be suspended; do not submit it twice.
+                    decider.onApplied(closed = true, ok = true)
+                } else applyState(closed = true)
             }
-            angle <= close -> {
-                if (pendingAction != null ||
-                    (currentMode == Prefs.MODE_DIRECT && DirectStateController.hasRequest)) return
-                if (!ShimState.overrideClosed && !holdPending) {
-                    if (Config.CLOSE_HOLD_MS == 0L) {
-                        applyState(closed = true)
-                    } else {
-                        holdPending = true
-                        wakeLock.acquire(Config.WAKELOCK_MS)
-                        handler.postDelayed(holdRunnable, Config.CLOSE_HOLD_MS)
-                    }
-                }
-            }
-            else -> cancelHold()
+            Decision.RequestOpen -> applyState(closed = false)
+            Decision.None -> Unit
+        }
+        handler.removeCallbacks(holdRunnable)
+        decider.nextEvaluationMs?.let { deadline ->
+            wakeLock.acquire(Config.WAKELOCK_MS)
+            handler.postDelayed(holdRunnable, (deadline - SystemClock.elapsedRealtime()).coerceAtLeast(0))
         }
     }
 
     private fun cancelHold() {
-        if (holdPending) {
-            holdPending = false
-            handler.removeCallbacks(holdRunnable)
-        }
+        handler.removeCallbacks(holdRunnable)
     }
 
-    private fun clearPendingAction() {
+    private fun clearPendingAction(abandoned: Boolean = true) {
         pendingId?.let { StateActivity.abandonAction(it) }
+        if (abandoned) pendingAction?.let { decider.onApplied(it == StateActivity.ACTION_CLOSED, false) }
         handler.removeCallbacks(pendingTimeout)
         pendingAction = null
         pendingId = null
@@ -241,21 +227,20 @@ class FoldService : Service(), SensorEventListener {
 
     private fun completeDirectAction(success: Boolean, error: String?) {
         val action = pendingAction ?: return
-        clearPendingAction()
-        if (success) {
-            if (action == StateActivity.ACTION_OPEN) {
-                ShimState.overrideClosed = false
-                resetConfirmed = true
-            } else {
-                resetConfirmed = false
-            }
-        } else {
+        clearPendingAction(abandoned = false)
+        val closed = action == StateActivity.ACTION_CLOSED
+        // A request can have executed just before its activity result times out.
+        // hasRequest means accepted (possibly suspended), and still needs cancellation.
+        val applied = success || (closed && DirectStateController.hasRequest)
+        decider.onApplied(closed, applied)
+        if (success && !closed) ShimState.overrideClosed = false
+        if (!success) {
             ShimState.lastCallbackResult = error ?: "direct action failed"
         }
         publish(force = true)
         // Reconcile an angle that crossed the opposite threshold during the activity.
         // Failure waits for a new sensor event instead of retrying in a tight loop.
-        if (success) evaluate()
+        if (applied) evaluate()
     }
 
     private fun applyState(closed: Boolean): Boolean {
@@ -295,7 +280,9 @@ class FoldService : Service(), SensorEventListener {
 
         val arg = if (closed) Config.ARG_CLOSED else Config.ARG_RESET
         val result = ShizukuBridge.exec(arg, 1500)
-        if (result != null && result.code == 0) {
+        val ok = result != null && result.code == 0
+        decider.onApplied(closed, ok)
+        if (ok) {
             ShimState.overrideClosed = closed
             Log.i(Config.TAG, "Shizuku mode state change: ${if (closed) "OPEN -> CLOSED" else "CLOSED -> OPEN"} angle=$lastAngle")
         } else {
@@ -303,7 +290,7 @@ class FoldService : Service(), SensorEventListener {
             Log.w(Config.TAG, "Shizuku mode state change to ${if (closed) "CLOSED" else "OPEN"} not applied, result=$result")
         }
         ShimState.changed()
-        return result != null && result.code == 0
+        return ok
     }
 
     private fun releaseWakeLock() {

@@ -23,7 +23,8 @@ RUN (yes || true) | sdkmanager --licenses > /dev/null \
 WORKDIR /src
 COPY . .
 RUN mkdir -p /root/.android && cp debug.keystore /root/.android/debug.keystore
-RUN chmod +x gradlew && ./gradlew --no-daemon assembleDebug
+RUN chmod +x gradlew && ./gradlew --no-daemon testDebugUnitTest lintDebug \
+    && ./gradlew --no-daemon assembleDebug
 
 FROM scratch AS apk
 COPY --from=build /src/app/build/outputs/apk/debug/app-debug.apk /app-debug.apk

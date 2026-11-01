@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">FoldLidShim</string>
+
+    <string name="shizuku_label">Shizuku: %1$s</string>
+    <string name="shizuku_not_installed">не установлен</string>
+    <string name="shizuku_not_running">не запущен</string>
+    <string name="shizuku_no_permission">нет разрешения</string>
+    <string name="shizuku_ready">готов</string>
+    <string name="btn_request_permission">Запросить разрешение Shizuku</string>
+
+    <string name="sensor_label">Датчик шарнира: %1$s</string>
+    <string name="sensor_present">есть</string>
+    <string name="sensor_absent">нет</string>
+    <string name="angle_label">Угол: %1$s</string>
+    <string name="angle_unknown">неизвестен</string>
+    <string name="angle_value">%1$.0f°</string>
+    <string name="state_label">Состояние: %1$s</string>
+    <string name="state_open">OPEN</string>
+    <string name="state_closed">CLOSED (override)</string>
+
+    <string name="switch_service">Служба включена</string>
+
+    <string name="hint_close_deg">Закрыто при угле не более (градусы)</string>
+    <string name="hint_open_deg">Открыто при угле не менее (градусы)</string>
+    <string name="btn_save_thresholds">Сохранить пороги</string>
+    <string name="thresholds_saved">Пороги сохранены</string>
+    <string name="thresholds_invalid">Нужно: 0 &lt;= закрыто &lt; открыто &lt;= 180</string>
+
+    <string name="btn_test_now">Проверить сейчас</string>
+    <string name="test_started">state 0, через 3 секунды state reset</string>
+    <string name="test_unavailable">Shizuku не готов</string>
+    <string name="test_result">state %1$s: код %2$d</string>
+    <string name="test_failed">state %1$s: не выполнено</string>
+
+    <string name="btn_battery">Оптимизация батареи</string>
+
+    <string name="notif_channel">Состояние шарнира</string>
+    <string name="notif_title">FoldLidShim</string>
+    <string name="notif_waiting_shizuku">Ожидание Shizuku (%1$s)</string>
+    <string name="notif_no_sensor">Датчика шарнира нет</string>
+    <string name="notif_waiting_angle">Ожидание угла шарнира, override: %1$s</string>
+    <string name="notif_status">Угол: %1$s, override: %2$s</string>
+</resources>

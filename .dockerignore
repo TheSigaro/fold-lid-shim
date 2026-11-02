@@ -7,3 +7,4 @@ app/build
 local.properties
 *.iml
 tools/recordings/
+analysis/

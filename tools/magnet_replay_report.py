@@ -111,7 +111,8 @@ def replay(path, threshold=None, filtered=True, safeguards=True, phantom_hold_ns
     header = next(int(r[0]) for r in rows if r[2] == "header")
     features = []
     last_hinge = -1
-    disturbed_until = phantom_until = -10**30
+    disturbed_until = phantom_until = field_until = -10**30
+    field_first = None
     with open(path, newline="", encoding="utf-8") as f:
         for r in csv.reader(f, delimiter=";"):
             t, kind = int(r[1]), r[2]
@@ -155,7 +156,10 @@ def replay(path, threshold=None, filtered=True, safeguards=True, phantom_hold_ns
                 mag.clear()
                 gyro.clear()
             if norm(sub(v, h)) > 42 + 67 + 20:
-                disturbed_until = t + 30_000_000_000
+                if field_first is None:
+                    field_first = t
+                field_until = t + 30_000_000_000
+                disturbed_until = field_until
             if hinge == 180 and (not filtered or t >= disturbed_until):
                 if last_fit is None:
                     last_fit = t
@@ -208,7 +212,10 @@ def replay(path, threshold=None, filtered=True, safeguards=True, phantom_hold_ns
                 if filtered and safeguards:
                     disturbed_until = max(disturbed_until, phantom_until)
             plausible = plausible and (not safeguards or t >= phantom_until)
-            features.append(dict(pre_rise=pre_rise, phantom=phantom, max_gyro=max_gyro,
+            features.append(dict(close_gate=close_gate, open_gate=open_gate, ninety=ninety,
+                                 opened_since_closed=opened_since_closed, closed_at=closed_at,
+                                 did_close=did_close, did_open=did_open, field_first=field_first,
+                                 field_until=field_until, field_norm=norm(after), pre_rise=pre_rise, phantom=phantom, max_gyro=max_gyro,
                                  open_threshold=candidate_threshold, quiet_rejected=quiet_rejected,
                                  recent_phantom=t < phantom_until, phantom_until=phantom_until,
                                  disturbed_until=disturbed_until, t=t, seconds=(t-header)/1e9, score=score, delta=delta,
@@ -250,6 +257,81 @@ def feature_row(label, f):
     print("| " + " | ".join([label] + values) + " |")
 
 
+def rejection_reasons(f, closed, threshold, header):
+    """List active blockers in detector order, including independent later checks."""
+    seconds = lambda t: f"{(t-header)/1e9:.6f}"
+    reasons = []
+    if f["t"] < f["field_until"]:
+        reasons.append(f"field129 first={seconds(f['field_first'])} until={seconds(f['field_until'])}")
+    if f["recent_phantom"]:
+        reasons.append(f"phantom until={seconds(f['phantom_until'])}")
+    if not f["directional"]:
+        reasons.append(f"direction {f['perpendicular']:.3f} > {0.65*abs(f['score']):.3f}")
+    if (f["score"] if closed else -f["score"]) < threshold:
+        reasons.append(f"threshold {threshold:g}")
+    if closed:
+        if f["hinge"] is None or f["hinge"] > 90:
+            reasons.append("closing hinge >90 or unknown")
+        if f["ninety"] is None or not 0 <= f["t"]-f["ninety"] <= 10_000_000_000:
+            reasons.append("no hinge90 in last 10s")
+        if f["did_close"]:
+            reasons.append("didClose latch")
+        if not f["opened_since_closed"]:
+            reasons.append("no hinge180 since hinge0 (or closing consumed cycle)")
+    else:
+        if f["hinge"] != 0:
+            reasons.append("opening hinge !=0")
+        if f["closed_at"] is None or f["t"]-f["closed_at"] < 700_000_000:
+            reasons.append("opening closedAt <700ms or unknown")
+        if f["did_open"]:
+            reasons.append("didOpen latch")
+        if f["pre_rise"] is None or f["pre_rise"] > 10:
+            reasons.append("pre-rise " + ("missing" if f["pre_rise"] is None else f"{f['pre_rise']:.3f} >10"))
+        if f["max_gyro"] is not None and f["max_gyro"] < QUIET_GYRO and f["score"] > -35:
+            reasons.append(f"quiet maxGyro={f['max_gyro']:.6f}, threshold=35")
+    return "; ".join(reasons) or "none"
+
+
+def transition_diagnostics(header, transitions, events, features, close_threshold, open_threshold):
+    print("Transition diagnostics: signed maximum in 600ms before hinge; blockers in detector order.")
+    print("Watchdog and rollback block are not simulated; no screen broadcasts are available.")
+    for closed, t in transitions:
+        event = matched(events, closed, t)
+        label = f"{('closing' if closed else 'opening')} {(t-header)/1e9:.6f}"
+        if event:
+            et, score = event
+            print(f"  {label}: event={(et-header)/1e9:.6f} s={score:.3f} leadMs={(t-et)/1e6:.6f}")
+            continue
+        candidates = [f for f in features if t-600_000_000 <= f["t"] <= t
+                      and (f["score"] > 0 if closed else f["score"] < 0)]
+        best = max(candidates, key=lambda f: abs(f["score"]), default=None)
+        if best is None:
+            print(f"  {label}: no sample of required sign")
+        else:
+            threshold = close_threshold if closed else open_threshold
+            print(f"  {label}: maxAbs={abs(best['score']):.3f} at={best['seconds']:.6f}; "
+                  + rejection_reasons(best, closed, threshold, header))
+    # Consecutive threshold crossings describe foreign-field exposure without scenario timestamps.
+    crossings = [f for f in features if f["field_norm"] > 129]
+    if crossings:
+        print("Field129 first/last/until/max:", crossings[0]["seconds"], crossings[-1]["seconds"],
+              (crossings[-1]["field_until"]-header)/1e9, max(f["field_norm"] for f in crossings))
+    print("Opening candidates at/above threshold while hinge-ready (including blocked/latching):")
+    episodes = []
+    for f in features:
+        if not f["open_gate"] or f["score"] > -open_threshold:
+            continue
+        if not episodes or f["t"]-episodes[-1][-1]["t"] > 200_000_000:
+            episodes.append([])
+        episodes[-1].append(f)
+    for episode in episodes:
+        best = min(episode, key=lambda f: f["score"])
+        print(f"  {episode[0]['seconds']:.6f}..{episode[-1]['seconds']:.6f} "
+              f"best={best['seconds']:.6f} s={best['score']:.3f} "
+              f"preRise={best['pre_rise']} maxGyro={best['max_gyro']}: "
+              + rejection_reasons(best, False, open_threshold, header))
+
+
 def report(path):
     origin, header, transitions, baseline, raw, attempts, fits = replay(path, 22, False, False)
     _, _, _, events, features, _, _ = replay(path)
@@ -259,6 +341,7 @@ def report(path):
     print(f"phantom hold={PHANTOM_HOLD_NS / 1e9:g}s; no opening latch; pre-window rise <=10uT; quiet gyro <0.5rad/s uses opening=35uT")
     print("Recordings have no screen broadcasts; sensors are replayed continuously.")
     print("Baseline v11 events:", [(c, round((t-header)/1e9, 4), round(s, 3)) for c,t,s in baseline])
+    transition_diagnostics(header, transitions, events, features, 20, 18)
     print("Features at baseline v11 trigger, otherwise max |s| in 600ms before hinge:")
     print("| event | header+s | s | delta | angle to signed M (deg) | perpendicular | before B-H | before B-H-m0 | after B-H | after B-H-m0 | projection before -> after | pre-window rise | max gyro (rad/s) | recent phantom |")
     print("| " + " | ".join(["---"] * 14) + " |")
@@ -293,6 +376,7 @@ def report(path):
         false = [(c, (t-header)/1e9, s) for c,t,s in current
                  if not any(c == tc and abs(t-tt) <= 1_500_000_000 for tc,tt in transitions)]
         print(f"T={threshold}: events={len(current)} false={false}")
+        transition_diagnostics(header, transitions, current, fs, threshold, threshold)
         print("Opening gyro and applied threshold:",
               [(round(f["seconds"], 6), round(f["max_gyro"], 3) if f["max_gyro"] is not None else None,
                 f["open_threshold"]) for f in fs if any(not c and t == f["t"] for c,t,_ in current)])

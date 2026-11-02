@@ -150,4 +150,67 @@ class MagnetFoldDetectorReplayTest {
         }
     }
 
+    @Test fun scenarioRecordingPreservesV13CoverageWithoutLaptopEvents() {
+        // Baseline: unmodified v13 (930becb), Python replay on sensors-4-trim.csv,
+        // before report/test changes. Entries follow all 18 hinge transitions.
+        val baselineLeads = mapOf(
+            18.0 to listOf<Double?>(166.607500, 256.617760, 276.613073, 236.606562,
+                186.614375, 286.614583, null, 236.617031, null, null, null,
+                366.626823, 396.816510, 316.643021, 186.608906, null, null, null),
+            20.0 to listOf<Double?>(156.607500, 246.617760, 276.613073, 216.606562,
+                176.614375, 226.614583, null, null, null, null, null,
+                356.626823, 366.816510, 306.643021, 176.608906, null, null, null),
+            22.0 to listOf<Double?>(156.607500, 246.617760, 276.613073, 196.606562,
+                176.614375, 216.614583, null, null, null, null, null,
+                316.626823, 356.816510, 306.643021, 176.608906, null, null, null)
+        )
+        val baselineCounts = mapOf(18.0 to 11, 20.0 to 10, 22.0 to 10)
+        val rows = javaClass.getResourceAsStream("/sensors-4-trim.csv")!!.bufferedReader()
+            .use { it.readLines() }.map { it.split(';') }
+        val origin = rows.first { it[2] == "header" }[0].toLong()
+        for ((threshold, baseline) in baselineLeads) {
+            val events = mutableListOf<Event>()
+            val transitions = mutableListOf<Pair<Boolean, Long>>()
+            var previous: Float? = null
+            val detector = MagnetFoldDetector(
+                MagnetParams(closeThreshold = threshold, openThreshold = threshold),
+                object : MagnetFoldDetector.Listener {
+                    override fun closing(tNs: Long, score: Double) { events += Event(true, tNs, score) }
+                    override fun opening(tNs: Long, score: Double) { events += Event(false, tNs, score) }
+                })
+            for (r in rows) {
+                val t = r[1].toLong()
+                when (r[2]) {
+                    "36" -> {
+                        val angle = r[4].toFloat()
+                        if (previous != null && angle == 0f) transitions += true to t
+                        if (previous == 0f && angle >= 90f) transitions += false to t
+                        previous = angle
+                        detector.onHinge(t, angle)
+                    }
+                    "4" -> detector.onGyro(t, r[4].toDouble(), r[5].toDouble(), r[6].toDouble())
+                    "14" -> detector.onMag(t, r[4].toDouble(), r[5].toDouble(), r[6].toDouble())
+                }
+            }
+            assertEquals("All scenario transitions", 18, transitions.size)
+            assertTrue("Coverage degraded at T=$threshold: $events",
+                events.size >= baselineCounts.getValue(threshold))
+            for (event in events) assertTrue("False event at T=$threshold: $event", transitions.any {
+                it.first == event.closed && abs(it.second - event.t) <= 1_500_000_000L
+            })
+            assertTrue("Laptop event at T=$threshold: $events", events.none {
+                (it.t - origin) * 1e-9 in 59.0..79.0
+            })
+            for ((index, transition) in transitions.withIndex()) {
+                val lead = baseline[index] ?: continue
+                val event = events.filter {
+                    it.closed == transition.first && abs(it.t - transition.second) <= 1_500_000_000L
+                }.minByOrNull { it.t }
+                assertNotNull("Missing transition $index at T=$threshold", event)
+                assertTrue("Lead degraded at transition $index T=$threshold: $event",
+                    (transition.second - event!!.t) / 1e6 >= lead - 30.0)
+            }
+        }
+    }
+
 }

@@ -37,6 +37,8 @@ class FoldService : Service() {
     private val bounceTimeout = Runnable { evaluateDirect(); publish(force = true) }
     private lateinit var power: PowerManager
     private val overridePlanner = OverridePlanner()
+    private var closedEvidenceMs: Long? = null
+    private val closedTimeout = Runnable { evaluateDirect(); publish(force = true) }
     private val openedTimeout = Runnable { evaluateDirect(); publish(force = true) }
     private val screenReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -101,6 +103,7 @@ class FoldService : Service() {
             ignored("pending or inhibited")
             return
         }
+        if (closed) closedEvidenceMs = SystemClock.elapsedRealtime()
         if (!closed) hingeBounce.release()
         val event = "magnet ${if (closed) "closing" else "opening"} timestampNs=$tNs score=$score"
         Timeline.event(event)
@@ -113,6 +116,7 @@ class FoldService : Service() {
 
     private fun onHinge(tNs: Long, angle: Float) {
         if (!angle.isFinite() || angle !in 0f..180f || tNs <= realHingeNs) return
+        if (angle <= Prefs.closeDeg(this)) closedEvidenceMs = SystemClock.elapsedRealtime()
         realHingeAngle = angle
         realHingeNs = tNs
         magnetSensors?.hinge(tNs, angle)
@@ -162,6 +166,10 @@ class FoldService : Service() {
     private fun evaluateDirect() {
         if (stopping || !directReady) return
         val now = SystemClock.elapsedRealtime()
+        val systemOpened = overridePlanner.observeSystem(
+            ShimState.directBaseState ?: ShimState.directUnrequestedState,
+            DirectStateController.requestedState, now)
+        if (systemOpened && pendingAction == StateActivity.ACTION_CLOSED) clearPendingAction()
         DirectStateController.closedSentAt?.let {
             if (bounceRequestAt != it) { bounceRequestAt = it; hingeBounce.requested(it) }
         }
@@ -184,7 +192,10 @@ class FoldService : Service() {
             motion.failed() // Keep a manual cancellation until the next direction change.
         }
         val (_, open) = Prefs.thresholds(this)
-        val opening = stopAfterCancel || (!desiredClosed && angle >= open)
+        // Magnet confirmation comes from onHinge, after updating the real angle.
+        val openConfirmed = (realHingeAngle ?: lastAngle)?.let { it >= open } == true
+        val opening = stopAfterCancel || (!desiredClosed && angle >= open &&
+            (power.isInteractive || openConfirmed))
         // Abandon under the activity gate before reading ownership: an in-flight
         // binder call must either complete first or never execute.
         if ((opening && pendingAction == StateActivity.ACTION_CLOSED) ||
@@ -205,10 +216,15 @@ class FoldService : Service() {
             DirectStateController.requestedState, power.isInteractive, now,
             openZone = angle >= open, recoveryPending = recoveryPending || recoveryNeeded,
             requestsAllowed = pendingAction == null && !stopAfterCancel,
-            openedZone = (realHingeAngle ?: lastAngle)?.let { it >= open } == true)
+            openedZone = (realHingeAngle ?: lastAngle)?.let { it >= open } == true,
+            closedEvidenceMs = closedEvidenceMs, openConfirmed = openConfirmed)
         handler.removeCallbacks(openedTimeout)
         overridePlanner.openedDeadline?.let {
             handler.postDelayed(openedTimeout, (it - now).coerceAtLeast(1L))
+        }
+        handler.removeCallbacks(closedTimeout)
+        overridePlanner.closedDeadline?.takeIf { it > now }?.let {
+            handler.postDelayed(closedTimeout, (it - now).coerceAtLeast(1L))
         }
         if (plan.action == OverridePlanner.Action.WAKE && !stopAfterCancel && pendingAction == null) {
             plan.log?.let { Timeline.event(it) }
@@ -310,6 +326,7 @@ class FoldService : Service() {
                     AngleSensors(manager, currentInvert, Config.SOURCE_HINGE) { _, angle ->
                         hall.onAngle(angle)
                         onHinge(hingeSensors?.timestampNs ?: SystemClock.elapsedRealtimeNanos(), angle)
+                        evaluate()
                     }
                         .also { it.start(handler) }
                 }
@@ -414,6 +431,7 @@ class FoldService : Service() {
             AngleSensors(manager, currentInvert, Config.SOURCE_HINGE) { _, angle ->
                 hall.onAngle(angle)
                 onHinge(hingeSensors?.timestampNs ?: SystemClock.elapsedRealtimeNanos(), angle)
+                evaluate()
             }
                 .also { it.start(handler) }
         } else null

@@ -861,6 +861,8 @@ adb shell dumpsys procstats --hours 3 dev.pavlov.foldlidshim
 
 ## Проверки и сборка
 
+Полное описание проверок: [TESTING.md](TESTING.md).
+
 ```sh
 ./gradlew --no-daemon testDebugUnitTest lintDebug assembleDebug
 shellcheck build.sh

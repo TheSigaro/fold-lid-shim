@@ -301,6 +301,7 @@ object DirectStateController {
      * Updates ShimState immediately on callback events.
      */
     private fun createCallbackProxy(requestGeneration: Long, state: Int): Any {
+        var activated = false
         val handler = object : java.lang.reflect.InvocationHandler {
             override fun invoke(proxy: Any, method: java.lang.reflect.Method, args: Array<out Any>?): Any? {
                 when (method.name) {
@@ -312,6 +313,7 @@ object DirectStateController {
                     if (requestGeneration != generation) return null
                     when (method.name) {
                         "onRequestActivated" -> {
+                            activated = true
                             ShimState.overrideClosed = state == 0
                             ShimState.lastCallbackResult = "activated"
                             if (relockGeneration == requestGeneration) {
@@ -325,6 +327,13 @@ object DirectStateController {
                             ShimState.lastCallbackResult = "suspended"
                         }
                         "onRequestCanceled" -> {
+                            if (!activated) {
+                                // The request never applied, so the committed state is still the
+                                // system's own and no further callback follows the cancellation.
+                                ShimState.directUnrequestedState = ShimState.directCurrentState
+                                Timeline.event("request canceled before activation, " +
+                                    "system state=${ShimState.directCurrentState}")
+                            }
                             onCanceled?.invoke(requestGeneration, SystemClock.elapsedRealtime(),
                                 applicationPower?.isInteractive == true)
                             relockGeneration = null

@@ -19,6 +19,30 @@ object Prefs {
         sp(context).edit().putBoolean(KEY_ENABLED, value).apply()
     }
 
+    fun magnetEnabled(context: Context): Boolean = sp(context).getBoolean("magnet_enabled", true)
+    fun magnetEconomy(context: Context): Boolean = sp(context).getBoolean("magnet_economy", true)
+    fun setMagnetEnabled(context: Context, value: Boolean) {
+        sp(context).edit().putBoolean("magnet_enabled", value).apply()
+    }
+    fun setMagnetEconomy(context: Context, value: Boolean) {
+        sp(context).edit().putBoolean("magnet_economy", value).apply()
+    }
+    fun magnetCalibration(context: Context): MagnetCalibration? {
+        val p = sp(context)
+        if (!p.contains("magnet_hx")) return null
+        val h = MagnetVector(p.getFloat("magnet_hx", 67f).toDouble(),
+            p.getFloat("magnet_hy", -30.7f).toDouble(), p.getFloat("magnet_hz", 11.9f).toDouble())
+        val rms = p.getFloat("magnet_rms", Float.NaN).toDouble()
+        val radius = p.getFloat("magnet_radius", Float.NaN).toDouble()
+        if (!h.finite() || !rms.isFinite() || rms !in 0.0..5.0 || radius !in 35.0..65.0) return null
+        return MagnetCalibration(h, rms, radius, MagnetVector(0.0, 0.0, 0.0))
+    }
+    fun saveMagnetCalibration(context: Context, value: MagnetCalibration) {
+        sp(context).edit().putFloat("magnet_hx", value.h.x.toFloat())
+            .putFloat("magnet_hy", value.h.y.toFloat()).putFloat("magnet_hz", value.h.z.toFloat())
+            .putFloat("magnet_rms", value.rms.toFloat()).putFloat("magnet_radius", value.radius.toFloat()).apply()
+    }
+
     fun earlyEnabled(context: Context): Boolean = sp(context).getBoolean("early_enabled", true)
     fun earlyAngle(context: Context): Float = sp(context).getFloat("early_angle", 45f)
         .takeIf { it.isFinite() && it in 15f..90f }?.coerceAtLeast(closeDeg(context)) ?: 45f

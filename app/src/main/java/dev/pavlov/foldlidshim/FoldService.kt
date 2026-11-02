@@ -29,6 +29,77 @@ class FoldService : Service() {
     private lateinit var notificationManager: NotificationManager
     private var sensorManager: SensorManager? = null
     private var angleSensors: AngleSensors? = null
+    private var magnetSensors: MagnetSensors? = null
+    private val magnetPreview = MagnetPreview()
+    private var realHingeAngle: Float? = null
+    private var realHingeNs = Long.MIN_VALUE
+    private val magnetWatchdog = Runnable {
+        magnetPreview.expire(SystemClock.elapsedRealtimeNanos())?.let { p ->
+            val event = "magnet ${if (p.closed) "closing" else "opening"} false"
+            Timeline.event(event)
+            ShimState.magnetEvent = event
+            ShimState.magnetFalseCount = magnetPreview.falseCount
+            magnetSensors?.detector?.inhibitUntil(magnetPreview.blockedUntilNs)
+            evaluate()
+            publish(force = true)
+        }
+    }
+
+    private fun onMagnet(closed: Boolean, tNs: Long, score: Double) {
+        fun ignored(reason: String) {
+            Timeline.event("magnet ignored closed=$closed timestampNs=$tNs score=$score reason=$reason")
+        }
+        if (stopping || stopAfterCancel || reloadAfterCancel || !Prefs.magnetEnabled(this)) {
+            ignored("disabled or stopping")
+            return
+        }
+        // Hinge can overtake a delayed magnetometer callback from the hub.
+        if ((closed && realHingeAngle == 0f) || (!closed && (realHingeAngle ?: 0f) >= 90f)) {
+            ignored("hinge already arrived")
+            return
+        }
+        val now = SystemClock.elapsedRealtimeNanos()
+        // Old hub batches must not change today's display state.
+        if (now - tNs !in 0..1_000_000_000L) {
+            ignored("stale or future timestamp")
+            return
+        }
+        val (close, open) = Prefs.thresholds(this)
+        val desired = motion.previewAngle(if (closed) 0f else 90f, tNs, close, open,
+            Prefs.earlyEnabled(this), Prefs.earlyAngle(this))
+        if (!magnetPreview.start(closed, tNs, desired)) {
+            ignored("pending or inhibited")
+            return
+        }
+        val event = "magnet ${if (closed) "closing" else "opening"} timestampNs=$tNs score=$score"
+        Timeline.event(event)
+        ShimState.magnetEvent = event
+        handler.removeCallbacks(magnetWatchdog)
+        handler.postDelayed(magnetWatchdog, ((tNs + 1_500_000_000L - now + 999_999L) / 1_000_000L).coerceAtLeast(1))
+        evaluate()
+        publish(force = true)
+    }
+
+    private fun onHinge(tNs: Long, angle: Float) {
+        if (!angle.isFinite() || angle !in 0f..180f || tNs <= realHingeNs) return
+        realHingeAngle = angle
+        realHingeNs = tNs
+        magnetSensors?.hinge(tNs, angle)
+        magnetPreview.contradict(tNs, angle)?.let {
+            handler.removeCallbacks(magnetWatchdog)
+            Timeline.event("magnet closing false reason=hinge180 timestampNs=$tNs")
+            ShimState.magnetEvent = "magnet closing false reason=hinge180"
+            ShimState.magnetFalseCount = magnetPreview.falseCount
+            magnetSensors?.detector?.inhibitUntil(magnetPreview.blockedUntilNs)
+        }
+        val pending = magnetPreview.pending
+        magnetPreview.hinge(tNs, angle)?.let { lead ->
+            handler.removeCallbacks(magnetWatchdog)
+            val event = "magnet ${if (pending?.closed == true) "closing" else "opening"} confirmed leadMs=$lead timestampNs=$tNs"
+            Timeline.event(event)
+            ShimState.magnetEvent = event
+        }
+    }
     private var currentSource = Config.DEFAULT_SOURCE
     private var currentInvert = booleanArrayOf(true, false, true)
     private var forceOpened = true
@@ -89,13 +160,16 @@ class FoldService : Service() {
     private val retryCancel = Runnable { evaluateDirect(); publish(force = true) }
     private fun evaluateDirect() {
         if (stopping || !directReady) return
-        val angle = lastAngle ?: return
+        val desiredClosed = magnetPreview.desiredClosed ?: motion.closed
+        val angle = magnetPreview.pending?.let { if (it.closed) 0f else 90f } ?: lastAngle ?: return
+        ShimState.decision = (if (desiredClosed) "CLOSED" else "Снять CLOSED") +
+            (if (magnetPreview.pending != null) " (магнитометр)" else "")
         if (manualOpenGeneration != DirectStateController.manualOpenGeneration) {
             manualOpenGeneration = DirectStateController.manualOpenGeneration
             motion.failed() // Keep a manual cancellation until the next direction change.
         }
         val (_, open) = Prefs.thresholds(this)
-        val opening = stopAfterCancel || reloadAfterCancel || (!motion.closed && angle >= open)
+        val opening = stopAfterCancel || reloadAfterCancel || (!desiredClosed && angle >= open)
         // Abandon under the activity gate before reading ownership: an in-flight
         // binder call must either complete first or never execute.
         if (opening && pendingAction == StateActivity.ACTION_CLOSED) clearPendingAction()
@@ -130,7 +204,7 @@ class FoldService : Service() {
             ShimState.lastCallbackResult = StateActivity.OPEN_UNAVAILABLE
             return
         }
-        if (motion.closed && !motion.failedClosed) applyState(true)
+        if (desiredClosed && !motion.failedClosed) applyState(true)
     }
 
     private val pendingTimeout = Runnable {
@@ -173,6 +247,8 @@ class FoldService : Service() {
     override fun onCreate() {
         super.onCreate()
         ShimState.serviceRunning = true
+        ShimState.magnetFalseCount = 0
+        ShimState.magnetEvent = "нет событий"
         Timeline.event("service onCreate")
         currentMode = Prefs.getMode(this)
         if (currentMode == Prefs.MODE_DIRECT) DirectStateController.tryRegisterCallback(applicationContext)
@@ -203,9 +279,18 @@ class FoldService : Service() {
 
         sensorManager = getSystemService(SensorManager::class.java)
         handler.post {
+            magnetSensors = sensorManager?.let { manager ->
+                MagnetSensors(this, manager, handler, object : MagnetFoldDetector.Listener {
+                    override fun closing(tNs: Long, score: Double) = onMagnet(true, tNs, score)
+                    override fun opening(tNs: Long, score: Double) = onMagnet(false, tNs, score)
+                }).also { it.reload() }
+            }
             if (currentMode == Prefs.MODE_SHIZUKU || Prefs.angleSource(this) != Config.SOURCE_HINGE) {
                 hingeSensors = sensorManager?.let { manager ->
-                    AngleSensors(manager, currentInvert, Config.SOURCE_HINGE) { _, angle -> hall.onAngle(angle) }
+                    AngleSensors(manager, currentInvert, Config.SOURCE_HINGE) { _, angle ->
+                        hall.onAngle(angle)
+                        onHinge(hingeSensors?.timestampNs ?: SystemClock.elapsedRealtimeNanos(), angle)
+                    }
                         .also { it.start(handler) }
                 }
             }
@@ -264,6 +349,10 @@ class FoldService : Service() {
     }
 
     private fun handleReload() {
+        magnetPreview.clear()
+        handler.removeCallbacks(magnetWatchdog)
+        magnetSensors?.detector?.resetWindow()
+        magnetSensors?.reload()
         cancelHold()
         loadThresholds()
         val newMode = Prefs.getMode(this)
@@ -332,6 +421,7 @@ class FoldService : Service() {
         ShimState.removeListener(stateListener)
         handler.post {
             stopping = true
+            magnetSensors?.close()
             angleSensors?.stop()
             hingeSensors?.stop()
             ShizukuBridge.removeListener(bridgeListener)
@@ -361,7 +451,10 @@ class FoldService : Service() {
         if (currentMode == Prefs.MODE_DIRECT) {
             hingeSensors?.stop()
             hingeSensors = if (currentSource != Config.SOURCE_HINGE) sensorManager?.let { manager ->
-                AngleSensors(manager, currentInvert, Config.SOURCE_HINGE) { _, angle -> hall.onAngle(angle) }
+                AngleSensors(manager, currentInvert, Config.SOURCE_HINGE) { _, angle ->
+                    hall.onAngle(angle)
+                    onHinge(hingeSensors?.timestampNs ?: SystemClock.elapsedRealtimeNanos(), angle)
+                }
                     .also { it.start(handler) }
             } else null
         }
@@ -380,7 +473,11 @@ class FoldService : Service() {
     private fun onAngle(angle: Float) {
         if (stopping || !angle.isFinite()) return
         lastAngle = angle
-        if (currentSource == Config.SOURCE_HINGE) hall.onAngle(angle)
+        val preserveFailure = magnetPreview.desiredClosed == true && motion.failedClosed
+        if (currentSource == Config.SOURCE_HINGE) {
+            hall.onAngle(angle)
+            onHinge(angleSensors?.timestampNs ?: SystemClock.elapsedRealtimeNanos(), angle)
+        }
         ShimState.angle = angle
         startupGate.onAngle(angle)
         if (currentMode == Prefs.MODE_DIRECT) {
@@ -388,6 +485,7 @@ class FoldService : Service() {
             val before = motion.closed
             val timestamp = angleSensors?.timestampNs ?: SystemClock.elapsedRealtimeNanos()
             motion.angle(angle, timestamp, close, open, Prefs.earlyEnabled(this), Prefs.earlyAngle(this))
+            if (preserveFailure && motion.closed) motion.failed()
             val zone = (if (angle <= close) 1 else 0) or
                 (if (angle >= open) 2 else 0) or
                 (if (angle <= Prefs.earlyAngle(this)) 4 else 0)
@@ -427,7 +525,7 @@ class FoldService : Service() {
                 return
             }
         }
-        val angle = lastAngle ?: return
+        val angle = magnetPreview.pending?.let { if (it.closed) 0f else 90f } ?: lastAngle ?: return
         // Feed every zone, even while an activity is pending, to cancel interrupted holds.
         // The decider suppresses pending commands. hasRequest must not block opening.
         val decision = decider.onAngle(angle, SystemClock.elapsedRealtime())
@@ -472,7 +570,7 @@ class FoldService : Service() {
         val applied = success || (closed && DirectStateController.hasRequest)
         val wasRecovery = !closed && recoveryPending
         if (currentMode == Prefs.MODE_DIRECT) {
-            if (closed && !applied && motion.closed) motion.failed()
+            if (closed && !applied && (magnetPreview.desiredClosed ?: motion.closed)) motion.failed()
             if (!closed && recoveryPending) {
                 recoveryPending = false // A dead owner's request has no callback here; recover once.
                 if (!success) ShimState.lastCallbackResult = "Не удалось снять оставшийся запрос: ${error.orEmpty()}"

@@ -30,6 +30,16 @@ class DirectMotion {
         return closed
     }
 
+    /** Evaluate a preliminary sample without changing the real hinge history or its velocity. */
+    fun previewAngle(angle: Float, timestampNs: Long, close: Float, open: Float,
+                     early: Boolean, earlyAngle: Float): Boolean {
+        val copy = DirectMotion()
+        copy.closed = closed
+        copy.previousAngle = previousAngle
+        copy.previousNs = previousNs
+        return copy.angle(angle, maxOf(timestampNs, previousNs + 1), close, open, early, earlyAngle)
+    }
+
     fun failed() { failedClosed = true }
 }
 

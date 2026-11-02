@@ -6,6 +6,9 @@ import java.util.concurrent.CopyOnWriteArrayList
 
 /** Process-wide state shown by the UI; written by FoldService. */
 object ShimState {
+    @Volatile var magnetSensors = "Датчики выкл"
+    @Volatile var magnetEvent = "нет событий"
+    @Volatile var magnetFalseCount = 0
     @Volatile var serviceRunning = false
     @Volatile var directCurrentState: Int? = null
         set(value) {

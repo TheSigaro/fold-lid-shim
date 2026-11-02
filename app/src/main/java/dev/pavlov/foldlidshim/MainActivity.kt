@@ -38,6 +38,7 @@ class MainActivity : androidx.appcompat.app.AppCompatActivity() {
     private lateinit var btnOverlay: Button
     private lateinit var tvDsmStatus: TextView
     private lateinit var tvStatus: TextView
+    private lateinit var tvMagnet: TextView
 
     private lateinit var recordingControls: SensorRecordingControls
     private var resumed = false
@@ -125,6 +126,23 @@ class MainActivity : androidx.appcompat.app.AppCompatActivity() {
             }
         })
 
+        controls.addView(CheckBox(this).apply {
+            text = "Магнитометр"
+            isChecked = Prefs.magnetEnabled(this@MainActivity)
+            setOnCheckedChangeListener { _, checked ->
+                Prefs.setMagnetEnabled(this@MainActivity, checked)
+                if (isServiceRunning()) FoldService.reload(this@MainActivity)
+            }
+        })
+        controls.addView(CheckBox(this).apply {
+            text = "Экономия датчиков"
+            isChecked = Prefs.magnetEconomy(this@MainActivity)
+            setOnCheckedChangeListener { _, checked ->
+                Prefs.setMagnetEconomy(this@MainActivity, checked)
+                if (isServiceRunning()) FoldService.reload(this@MainActivity)
+            }
+        })
+        tvMagnet = TextView(this).also { controls.addView(it) }
         recordingControls = SensorRecordingControls(this, controls)
 
         // Restore mode selection
@@ -312,6 +330,7 @@ class MainActivity : androidx.appcompat.app.AppCompatActivity() {
     }
 
     private fun refresh() {
+        tvMagnet.text = "${ShimState.magnetSensors}\n${ShimState.magnetEvent}; ложных: ${ShimState.magnetFalseCount}"
         val attempt = ShimState.autoStartAttempt
         findViewById<TextView>(R.id.tvAutoStart).text = getString(R.string.autostart_status,
             dev.pavlov.foldlidshim.adb.AdbIdentity.status(this),

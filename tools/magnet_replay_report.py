@@ -76,7 +76,9 @@ def fit(points, validate=True):
     return h, rms, radius, span
 
 
-def report(path, window_ms=150, close_threshold=22, open_threshold=22, economy=False):
+def replay(path, threshold=None, filtered=True):
+    window_ms = 150
+    close_threshold = 20 if threshold is None else threshold; open_threshold = 18 if threshold is None else threshold
     h = (67.0, -30.7, 11.9)
     direction = scale((62, -25, 1), 1 / norm((62, -25, 1)))
     mag, gyro, calibration = deque(), deque(), deque(maxlen=2000)
@@ -84,15 +86,18 @@ def report(path, window_ms=150, close_threshold=22, open_threshold=22, economy=F
     last_sample = last_fit = None
     did_close = did_open = opened_since_closed = False
     latest = -10**30
-    events, transitions, scores, fits, attempts = [], [], [], [], []
+    events, transitions, fits, attempts = [], [], [], []
     with open(path, newline="", encoding="utf-8") as f:
-        origin = next(int(r[1]) for r in csv.reader(f, delimiter=";") if r[2] == "36")
+        rows = list(csv.reader(f, delimiter=";"))
+    origin = next(int(r[1]) for r in rows if r[2] == "36")
+    header = next(int(r[0]) for r in rows if r[2] == "header")
+    features = []
     last_hinge = -1
-    power = not economy
+    disturbed_until = -10**30
     with open(path, newline="", encoding="utf-8") as f:
         for r in csv.reader(f, delimiter=";"):
             t, kind = int(r[1]), r[2]
-            if kind not in {"4", "14", "36"} or t < latest - 1_000_000_000:
+            if kind not in {"4", "14", "36"} or (t < latest - 1_000_000_000 and not (kind == "36" and hinge is None)):
                 continue
             latest = max(t, latest)
             if kind == "36":
@@ -117,13 +122,6 @@ def report(path, window_ms=150, close_threshold=22, open_threshold=22, economy=F
                 if a == 180:
                     did_close, opened_since_closed = False, True
                 hinge = a
-                if economy:
-                    power = a <= 90
-                    if not power:
-                        mag.clear()
-                        gyro.clear()
-                continue
-            if not power:
                 continue
             v = tuple(map(float, r[4:7]))
             if kind == "4":
@@ -138,7 +136,9 @@ def report(path, window_ms=150, close_threshold=22, open_threshold=22, economy=F
             if mag and t - mag[-1][0] > 200_000_000:
                 mag.clear()
                 gyro.clear()
-            if hinge == 180:
+            if norm(sub(v, h)) > 42 + 67 + 20:
+                disturbed_until = t + 30_000_000_000
+            if hinge == 180 and (not filtered or t >= disturbed_until):
                 if last_fit is None:
                     last_fit = t
                 if (last_sample is None or t - last_sample >= 100_000_000) and (not calibration or norm(sub(v, calibration[-1])) >= 3):
@@ -146,11 +146,11 @@ def report(path, window_ms=150, close_threshold=22, open_threshold=22, economy=F
                     calibration.append(v)
                 if t - last_fit >= 30_000_000_000:
                     last_fit = t
-                    attempts.append(((t - origin) / 1e9, len(calibration), fit(calibration, validate=False)))
+                    attempts.append(((t - header) / 1e9, len(calibration), fit(calibration, validate=False)))
                     result = fit(calibration)
                     if result:
                         h = result[0]
-                        fits.append(((t - origin) / 1e9, len(calibration), result))
+                        fits.append(((t - header) / 1e9, len(calibration), result))
                         mag.clear()
                         gyro.clear()
             mag.append((t, v))
@@ -169,48 +169,134 @@ def report(path, window_ms=150, close_threshold=22, open_threshold=22, economy=F
                     earth = rotate(earth, omega, (gt - time) / 1e9)
                     omega, time = g, gt
                 earth = rotate(earth, omega, (t - time) / 1e9)
-            score = dot(sub(sub(v, h), earth), direction)
-            seconds = (t - origin) / 1e9
-            scores.append((seconds, score, hinge))
-            if score >= close_threshold and hinge is not None and hinge <= 90 and ninety is not None and 0 <= t - ninety <= 10_000_000_000 and not did_close and opened_since_closed:
+            delta = sub(sub(v, h), earth)
+            score = dot(delta, direction)
+            perpendicular = norm(sub(delta, scale(direction, score)))
+            before, after = sub(b, h), sub(v, h)
+            m0 = scale(direction, 67)
+            radii = (norm(before), norm(sub(before, m0)), norm(after), norm(sub(after, m0)))
+            plausible = perpendicular <= .65 * abs(score) and t >= disturbed_until
+            close_gate = (hinge is not None and hinge <= 90 and ninety is not None
+                          and 0 <= t - ninety <= 10_000_000_000 and opened_since_closed)
+            open_gate = hinge == 0 and closed_at is not None and t - closed_at >= 700_000_000
+            features.append(dict(t=t, seconds=(t-header)/1e9, score=score, delta=delta,
+                                 angle=math.degrees(math.atan2(perpendicular, abs(score))),
+                                 perpendicular=perpendicular, radii=radii,
+                                 projection=dot(after, direction), before_projection=dot(before, direction), hinge=hinge,
+                                 plausible=plausible, directional=perpendicular <= .65 * abs(score),
+                                 eligible=(score > 0 and close_gate) or (score < 0 and open_gate)))
+            if filtered and not plausible:
+                continue
+            if score >= close_threshold and close_gate and not did_close:
                 did_close, did_open, opened_since_closed, closed_at = True, False, False, t
                 events.append((True, t, score))
-            elif score <= -open_threshold and hinge == 0 and closed_at is not None and t - closed_at >= 700_000_000 and not did_open:
+            elif score <= -open_threshold and open_gate and not did_open:
                 did_open, did_close = True, False
                 events.append((False, t, score))
-    print(f"W={window_ms}ms close={close_threshold} open={open_threshold} economy={economy}")
-    leads = []
-    for close, t in transitions:
-        if (t - origin) / 1e9 <= 9:
-            continue
-        matches = [(et, s) for ec, et, s in events if ec == close and abs(et - t) <= 1_500_000_000]
-        event = min(matches) if matches else None
-        lead = (t - event[0]) / 1e6 if event else None
-        leads.append((close, lead))
-        print(f"hinge={(t-origin)/1e9:.3f} {'closing' if close else 'opening'} leadMs={lead} score={event[1] if event else None}")
-    false = [(c, (t-origin)/1e9, s) for c, t, s in events if not any(c == tc and abs(t-tt) <= 1_500_000_000 for tc, tt in transitions)]
-    print("false events:", false)
-    for lo, hi in [(28.2, 36.6), (43.6, 47.0)]:
-        values = [(abs(s), t, s) for t, s, _ in scores if lo <= t <= hi]
-        print(f"open rotation {lo}..{hi}: maxAbs/time/score={max(values) if values else None}")
-    calm = [(abs(s), t, s) for t, s, _ in scores if all(abs(t-(ht-origin)/1e9) > 1.5 for _, ht in transitions)]
-    print("outside transition windows maxAbs/time/score:", max(calm) if calm else None)
-    print("calibration attempts (time, count, H/rms/R/span):", attempts)
-    print("all collected open samples:", len(calibration), fit(calibration, validate=False))
+    return origin, header, transitions, events, features, attempts, fits
+
+
+def matched(events, closed, t):
+    return next(((et, score) for c, et, score in events
+                 if c == closed and abs(et - t) <= 1_500_000_000), None)
+
+
+def maximum(features):
+    f = max(features, key=lambda f: abs(f["score"]), default=None)
+    return "none" if f is None else f"{abs(f['score']):.3f} at header+{f['seconds']:.3f}s (s={f['score']:.3f})"
+
+
+def feature_row(label, f):
+    values = [f"{f['seconds']:.3f}", f"{f['score']:.2f}",
+              "(" + ",".join(f"{v:.2f}" for v in f["delta"]) + ")",
+              f"{f['angle']:.2f}", f"{f['perpendicular']:.2f}"]
+    values += [f"{v:.2f}" for v in f["radii"]]
+    values += [f"{f['before_projection']:.2f} -> {f['projection']:.2f}"]
+    print("| " + " | ".join([label] + values) + " |")
+
+
+def report(path):
+    origin, header, transitions, baseline, raw, attempts, fits = replay(path, 22, False)
+    _, _, _, events, features, _, _ = replay(path)
+    outside = lambda f: all(abs(f["t"] - t) > 1_500_000_000 for _, t in transitions)
+    print("Time is relative to header.receivedNs; hinge origin offset=%.6fs" % ((origin-header)/1e9))
+    print("W=150ms; T_close=20 T_open=18; k=0.65; R=42; m0=67; foreign field limit=129uT; quiet interval=30s")
+    print("Recordings have no screen broadcasts; sensors are replayed continuously.")
+    print("Baseline v11 events:", [(c, round((t-header)/1e9, 4), round(s, 3)) for c,t,s in baseline])
+    print("Features at baseline v11 trigger, otherwise max |s| in 600ms before hinge:")
+    print("| event | header+s | s | delta | angle to signed M (deg) | perpendicular | before B-H | before B-H-m0 | after B-H | after B-H-m0 | projection before -> after |")
+    print("| " + " | ".join(["---"] * 11) + " |")
+    for c, t in transitions:
+        match = matched(baseline, c, t)
+        f = next((f for f in raw if match and f["t"] == match[0]), None)
+        if f is None:
+            f = max((f for f in raw if t-600_000_000 <= f["t"] <= t),
+                    key=lambda f: abs(f["score"]), default=None)
+        if f:
+            feature_row(("closing" if c else "opening") + f" hinge+{(t-header)/1e9:.3f}", f)
+    if not transitions:
+        feature_row("v11 false +56.4", min(raw, key=lambda f: abs(f["seconds"]-56.402546549)))
+        with open(path, newline="", encoding="utf-8") as recording:
+            markers = [(int(r[1])-header)/1e9 for r in csv.reader(recording, delimiter=";")
+                       if r[2] == "65579"]
+        print("interrupt_gyro movement markers (header+s):", [round(t,3) for t in markers])
+        print("Nominal scenario windows, then neighborhoods of late interrupt markers; "
+              "these are not ground-truth labels of individual partial openings.")
+        for lo, hi in [(60,65), (65,70), (70,75), (68,72), (75,79), (83,86)]:
+            subset = [f for f in raw if lo <= f["seconds"] <= hi]
+            if not subset:
+                continue
+            feature_row(f"partial interval {lo}..{hi} max abs(s)", max(subset, key=lambda f: abs(f["score"])))
+            lowest = min(subset, key=lambda f: f["score"])
+            if lowest is not max(subset, key=lambda f: abs(f["score"])):
+                feature_row(f"partial interval {lo}..{hi} minimum s", lowest)
+            print("Projection range %s..%ss: %.2f..%.2f uT" %
+                  (lo, hi, min(f["projection"] for f in subset), max(f["projection"] for f in subset)))
+    print("Strict sphere filter (+/-20) is diagnostic only; it rejects real events.")
+    for closed, t, score in baseline:
+        f = next(f for f in raw if f["t"] == t)
+        r = f["radii"]
+        before, after = (r[0], r[3]) if closed else (r[1], r[2])
+        print(f"  sphere error at {'closing' if closed else 'opening'} +{f['seconds']:.3f}: "
+              f"before={before-42:+.2f} after={after-42:+.2f} uT")
+    print("Threshold sweep (no preview watchdog/cooldown masks later candidates):")
+    for threshold in (18,20,22):
+        _, _, _, current, fs, _, _ = replay(path, threshold)
+        false = [(c, (t-header)/1e9, s) for c,t,s in current
+                 if not any(c == tc and abs(t-tt) <= 1_500_000_000 for tc,tt in transitions)]
+        print(f"T={threshold}: events={len(current)} false={false}")
+        for c,t in transitions:
+            if (t-origin)/1e9 <= 9:
+                continue
+            old, new = matched(baseline,c,t), matched(current,c,t)
+            lead = lambda e: round((t-e[0])/1e6, 3) if e else None
+            print(f"  hinge+{(t-header)/1e9:.3f} {'closing' if c else 'opening'} leadMs old={lead(old)} new={lead(new)}")
+            if old:
+                assert new is not None and t-new[0] >= t-old[0]-30_000_000
+        assert not false, false
+        assert len(current) == (7 if transitions else 0), current
+    print("events:", [(c, round((t-header)/1e9,4), round(s,3)) for c,t,s in events])
+    print("outside transition windows raw max |s|:", maximum(f for f in features if outside(f)))
+    print("outside after direction + foreign-field filter, before hinge gates:",
+          maximum(f for f in features if outside(f) and f["plausible"]))
+    valid = [f for f in features if outside(f) and f["plausible"] and f["eligible"]]
+    print("outside after filters AND hinge gates (without didOpen/didClose):", maximum(valid))
+    assert all(abs(f["score"]) <= 18-5 for f in valid)
+    if transitions:
+        for lo, hi in [(28.2,36.6), (43.6,47.0)]:
+            rotation = [f for f in features if lo <= (f["t"]-origin)/1e9 <= hi]
+            print(f"open rotation hinge+{lo}..{hi}: raw={maximum(rotation)}; "
+                  f"after filters={maximum(f for f in rotation if f['plausible'])}")
+    print("calibration attempts (header+s, count, H/rms/R/span):", attempts)
     print("calibrations:", fits)
-    print("events:", [(c, round((t-origin)/1e9, 4), round(s, 3)) for c,t,s in events])
-    assert not false, false
-    closes = [lead for close, lead in leads if close]
-    assert closes[0] is None or closes[0] >= 0, closes
-    assert all(lead is not None and lead >= 20 for lead in closes[1:]), closes
-    opens = [lead for close, lead in leads if not close]
-    assert sum(lead is not None and lead >= 100 for lead in opens) >= 3, opens
-    assert all(lead is not None and lead >= 0 for lead in opens), opens
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("fixture")
-    parser.add_argument("--economy", action="store_true", help="Disable high-rate sensors at hinge 180")
+    parser.add_argument("--economy", action="store_true",
+                        help="Assume an interactive screen; fixtures contain no screen broadcasts")
     args = parser.parse_args()
-    report(args.fixture, economy=args.economy)
+    if args.economy:
+        print("Screen economy: interactive screen assumed throughout this recording.")
+    report(args.fixture)

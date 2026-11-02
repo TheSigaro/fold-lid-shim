@@ -1,12 +1,15 @@
 package dev.pavlov.foldlidshim
 
+import android.content.BroadcastReceiver
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.Context
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.os.Handler
-import android.os.SystemClock
+import android.os.PowerManager
 import java.util.Locale
 
 /** All methods and sensor callbacks run on FoldService's HandlerThread, never on main. */
@@ -18,9 +21,7 @@ class MagnetSensors(
 ) : SensorEventListener {
     private val mag = manager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD_UNCALIBRATED)?.takeUnless { it.isWakeUpSensor }
     private val gyro = manager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)?.takeUnless { it.isWakeUpSensor }
-    private val interrupt = manager.getSensorList(Sensor.TYPE_ALL).firstOrNull {
-        !it.isWakeUpSensor && it.name.contains("interrupt_gyro", ignoreCase = true)
-    }
+    private val power = context.getSystemService(PowerManager::class.java)
     private var calibration = Prefs.magnetCalibration(context)
     val detector = MagnetFoldDetector(
         MagnetParams(hardIron = calibration?.h ?: MagnetParams().hardIron), listener
@@ -33,21 +34,25 @@ class MagnetSensors(
     private var enabled = false
     private var economy = true
     private var running = false
-    private var interruptRegistered = false
-    private var angle: Float? = null
+    private var receiverRegistered = false
     private var hingeNs = Long.MIN_VALUE
-    private var idleSince = 0L
     private var error = ""
-    private val idle = Runnable { updatePower() }
+    private val screenReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) { updatePower() }
+    }
 
     fun reload() {
         enabled = Prefs.magnetEnabled(context)
         economy = Prefs.magnetEconomy(context)
-        if (enabled && economy && interrupt != null && !interruptRegistered) {
-            interruptRegistered = manager.registerListener(this, interrupt, 10_000, 0, handler)
-        } else if ((!enabled || !economy) && interruptRegistered) {
-            interrupt?.let { manager.unregisterListener(this, it) }
-            interruptRegistered = false
+        if (enabled && economy && !receiverRegistered) {
+            context.registerReceiver(screenReceiver, IntentFilter().apply {
+                addAction(Intent.ACTION_SCREEN_ON)
+                addAction(Intent.ACTION_SCREEN_OFF)
+            }, null, handler, Context.RECEIVER_NOT_EXPORTED)
+            receiverRegistered = true
+        } else if ((!enabled || !economy) && receiverRegistered) {
+            context.unregisterReceiver(screenReceiver)
+            receiverRegistered = false
         }
         updatePower()
     }
@@ -55,17 +60,12 @@ class MagnetSensors(
     fun hinge(t: Long, value: Float) {
         if (t <= hingeNs || !value.isFinite() || value !in 0f..180f) return
         hingeNs = t
-        if (angle != value) idleSince = t
-        angle = value
         detector.onHinge(t, value)
         updatePower()
     }
 
     private fun updatePower() {
-        handler.removeCallbacks(idle)
-        val now = SystemClock.elapsedRealtimeNanos()
-        val flexIdle = angle == 90f && interruptRegistered && now - idleSince >= 10_000_000_000L
-        val wanted = enabled && (!economy || (angle != null && angle!! <= 90f && !flexIdle))
+        val wanted = enabled && (!economy || power.isInteractive)
         if (wanted && !running) {
             error = ""
             running = mag != null && manager.registerListener(this, mag, 10_000, 0, handler)
@@ -80,9 +80,6 @@ class MagnetSensors(
             detector.resetWindow()
             Timeline.event("magnet sensors on=false")
         }
-        if (enabled && economy && angle == 90f && interruptRegistered && !flexIdle) {
-            handler.postDelayed(idle, ((idleSince + 10_000_000_000L - now) / 1_000_000L).coerceAtLeast(1))
-        }
         publish()
     }
 
@@ -90,8 +87,11 @@ class MagnetSensors(
         val h = detector.hardIron
         val m = detector.params.direction
         val status = String.format(Locale.ROOT,
-            "Датчики %s%s; H=(%.1f, %.1f, %.1f) %s; M=(%.2f, %.2f, %.2f)",
-            if (running) "вкл" else "выкл", error, h.x, h.y, h.z,
+            "Датчики %s (%s)%s; H=(%.1f, %.1f, %.1f) %s; M=(%.2f, %.2f, %.2f)",
+            if (running) "вкл" else "выкл",
+            if (!enabled) "магнитометр отключён" else if (!economy) "без экономии"
+            else if (power.isInteractive) "экран включён" else "экран погашен",
+            error, h.x, h.y, h.z,
             calibration?.let { "калибровка rms=%.2f".format(Locale.ROOT, it.rms) } ?: "сид", m.x, m.y, m.z)
         if (ShimState.magnetSensors != status) {
             ShimState.magnetSensors = status
@@ -102,17 +102,16 @@ class MagnetSensors(
     override fun onSensorChanged(event: SensorEvent) {
         val v = event.values
         when (event.sensor) {
-            interrupt -> {
-                idleSince = event.timestamp
-                updatePower()
-            }
             mag -> if (running && v.size >= 3) detector.onMag(event.timestamp, v[0].toDouble(), v[1].toDouble(), v[2].toDouble())
             gyro -> if (running && v.size >= 3) detector.onGyro(event.timestamp, v[0].toDouble(), v[1].toDouble(), v[2].toDouble())
         }
     }
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
     fun close() {
-        handler.removeCallbacks(idle)
+        if (receiverRegistered) {
+            context.unregisterReceiver(screenReceiver)
+            receiverRegistered = false
+        }
         manager.unregisterListener(this)
         detector.resetWindow()
         running = false

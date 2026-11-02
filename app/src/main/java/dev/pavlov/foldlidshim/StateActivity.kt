@@ -67,7 +67,7 @@ class StateActivity : Activity() {
     private var accepted = false
     private var actionError: String? = null
     private val stateChanged = Runnable {
-        if (executed.get() && !ShimState.directConfirmationPending) finish()
+        if (executed.get() && !ShimState.directConfirmationPending) finishAndRemoveTask()
     }
     private var receiver: ResultReceiver? = null
 
@@ -155,7 +155,7 @@ class StateActivity : Activity() {
         }
         // Result is sent by onDestroy, after relinquishing this foreground window.
         // Keep the foreground context for confirmation; callback ends it without polling.
-        if (!success || !ShimState.directConfirmationPending) finish()
+        if (!success || !ShimState.directConfirmationPending) finishAndRemoveTask()
     }
 
     /**
@@ -190,6 +190,6 @@ class StateActivity : Activity() {
     private val focusTimeoutRunnable = Runnable {
         executed.set(true)
         report(false, "focus timeout after ${FOCUS_TIMEOUT_MS}ms")
-        finish()
+        finishAndRemoveTask()
     }
 }

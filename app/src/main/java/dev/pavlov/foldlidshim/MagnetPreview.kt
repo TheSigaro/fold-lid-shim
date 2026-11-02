@@ -34,9 +34,10 @@ class MagnetPreview {
         blockedUntilNs = nowNs + 30_000_000_000L
         return p
     }
+    fun timeoutNs(closed: Boolean) = if (closed) 1_500_000_000L else 800_000_000L
     fun expire(nowNs: Long): Pending? {
         val p = pending ?: return null
-        if (nowNs - p.tNs < 1_500_000_000L) return null
+        if (nowNs - p.tNs < timeoutNs(p.closed)) return null
         return reject(nowNs)
     }
     fun clear() { pending = null }

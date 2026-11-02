@@ -40,6 +40,7 @@
             android:theme="@android:style/Theme.Translucent.NoTitleBar"
             android:exported="true"
             android:excludeFromRecents="true"
+            android:autoRemoveFromRecents="true"
             android:noHistory="true"
             android:taskAffinity="" />
 
@@ -63,10 +64,11 @@
             android:name=".StateActivity"
             android:exported="false"
             android:launchMode="singleTop"
-            android:taskAffinity="${applicationId}"
+            android:taskAffinity=""
             android:showWhenLocked="true"
             android:turnScreenOn="true"
             android:excludeFromRecents="true"
+            android:autoRemoveFromRecents="true"
             android:noHistory="true"
             android:theme="@style/StateActivityTheme">
         </activity>

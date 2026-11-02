@@ -161,4 +161,88 @@ class MagnetFoldDetectorTest {
         assertNotNull(p.expire(45_500_000_000))
         assertEquals(2, p.falseCount)
     }
+    private fun vector(d: MagnetFoldDetector, ms: Long, along: Double, across: Double = 0.0) {
+        val p = d.params
+        val perpendicular = p.direction.cross(MagnetVector(0.0, 0.0, 1.0)).unit()
+        val b = p.hardIron + p.direction * along + perpendicular * across
+        d.onMag(ms * 1_000_000, b.x, b.y, b.z)
+    }
+
+    @Test fun directionFilterRejectsBothSignsAndKeepsAlignedLidMotion() {
+        for (opening in listOf(false, true)) {
+            for (ratio in listOf(0.64, 0.66)) {
+                val c = Capture()
+                val d = MagnetFoldDetector(listener = c)
+                if (opening) d.onHinge(0, 0f) else {
+                    d.onHinge(0, 180f)
+                    d.onHinge(1, 90f)
+                }
+                for (ms in 1000L..1300 step 10) vector(d, ms, if (opening) 100.0 else 40.0)
+                for (ms in 1310L..1500 step 10)
+                    vector(d, ms, 70.0, 30.0 * ratio)
+                assertEquals("opening=$opening ratio=$ratio", if (ratio < 0.65) 1 else 0,
+                    if (opening) c.opening.size else c.closing.size)
+            }
+        }
+    }
+
+    @Test fun foreignFieldQuarantinesItsRemovalAndRecoversAfterQuietInterval() {
+        val c = Capture()
+        val d = MagnetFoldDetector(listener = c)
+        d.onHinge(0, 0f)
+        for (ms in 1000L..1200 step 10) vector(d, ms, 100.0)
+        vector(d, 1210, 140.0) // Outside even the closed sphere envelope.
+        for (ms in 1220L..1400 step 10) vector(d, ms, 40.0)
+        assertTrue(c.opening.isEmpty())
+        for (ms in 30000L..30500 step 10) vector(d, ms, if (ms < 30300) 100.0 else 40.0)
+        assertTrue(c.opening.isEmpty())
+        for (ms in 32000L..32400 step 10) vector(d, ms, if (ms < 32200) 100.0 else 40.0)
+        assertEquals(listOf(32_200_000_000L), c.opening)
+    }
+
+    @Test fun rollbackRearmsBothDirectionsWithoutAnotherConfirmingHinge() {
+        for (opening in listOf(false, true)) {
+            val c = Capture()
+            val d = MagnetFoldDetector(listener = c)
+            if (opening) d.onHinge(0, 0f) else {
+                d.onHinge(0, 180f)
+                d.onHinge(1, 90f)
+            }
+            fun jump(start: Long) {
+                for (ms in start..start+400 step 10)
+                    vector(d, ms, if ((ms < start+200) == opening) 100.0 else 40.0)
+            }
+            jump(1000)
+            assertEquals(1, if (opening) c.opening.size else c.closing.size)
+            d.inhibitUntil(32_000_000_000L)
+            // Refresh Flex eligibility, without resetting the opening/closing latch via 0/180.
+            if (!opening) d.onHinge(31_000_000_000L, 90f)
+            jump(31500)
+            assertEquals(1, if (opening) c.opening.size else c.closing.size)
+            jump(32500)
+            assertEquals(2, if (opening) c.opening.size else c.closing.size)
+        }
+    }
+
+    @Test fun initialCachedHingeSeedsStateButLaterStaleHingeIsIgnored() {
+        val c = Capture()
+        val d = MagnetFoldDetector(listener = c)
+        d.onGyro(31_000_000_000L, 0.0, 0.0, 0.0)
+        d.onHinge(0, 0f)
+        d.onHinge(1, 180f) // Not the first hinge any more, now stale.
+        for (ms in 32000L..32400 step 10) vector(d, ms, if (ms < 32200) 100.0 else 40.0)
+        assertEquals(listOf(32_200_000_000L), c.opening)
+    }
+
+    @Test fun openingWatchdogUsesEightHundredMillisecondsClosingKeepsFifteenHundred() {
+        for (closed in listOf(false, true)) {
+            val p = MagnetPreview()
+            p.start(closed, 10_000_000_000L)
+            val timeout = if (closed) 1_500_000_000L else 800_000_000L
+            assertNull(p.expire(10_000_000_000L + timeout - 1))
+            assertNotNull(p.expire(10_000_000_000L + timeout))
+            assertEquals(10_000_000_000L + timeout + 30_000_000_000L, p.blockedUntilNs)
+        }
+    }
+
 }

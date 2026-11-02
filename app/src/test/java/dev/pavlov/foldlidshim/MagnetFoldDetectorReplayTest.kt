@@ -71,6 +71,12 @@ class MagnetFoldDetectorReplayTest {
             Triple(closed, t, lead)
         }
         println("MAGNET calmMax=${calmMax} fits=$fits events=$events")
+        val baselineLeads = listOf<Double?>(null, 280.070469, 200.051042, 180.179687,
+            70.192187, 240.193854, 110.173802, 380.183698)
+        leads.zip(baselineLeads).forEach { (actual, baseline) ->
+            if (baseline != null) assertTrue("Lead degraded: $actual baseline=$baseline",
+                actual.third != null && actual.third!! >= baseline - 30.0)
+        }
         for (event in events) assertTrue("False event $event", transitions.any {
             it.first == event.closed && abs(it.second - event.t) <= 1_500_000_000L
         })
@@ -80,4 +86,28 @@ class MagnetFoldDetectorReplayTest {
         assertTrue("At least three early openings", leads.count { !it.first && it.third != null && it.third!! >= 100 } >= 3)
         leads.filter { !it.first }.forEach { assertTrue("Missing early opening $it", it.third != null && it.third!! >= 0) }
     }
+    @Test fun closedRecordingHasNoEventsEvenAfterForeignFieldAndPartialOpenings() {
+        for (threshold in listOf(18.0, 20.0, 22.0)) {
+            val events = mutableListOf<Event>()
+            val d = MagnetFoldDetector(MagnetParams(closeThreshold = threshold, openThreshold = threshold),
+                object : MagnetFoldDetector.Listener {
+                    override fun closing(tNs: Long, score: Double) { events += Event(true, tNs, score) }
+                    override fun opening(tNs: Long, score: Double) { events += Event(false, tNs, score) }
+                })
+            val rows = javaClass.getResourceAsStream("/sensors-2-trim.csv")!!.bufferedReader().use { it.readLines() }
+            for (line in rows) {
+                val r = line.split(';')
+                val t = r[1].toLong()
+                when (r[2]) {
+                    "36" -> d.onHinge(t, r[4].toFloat())
+                    "4" -> d.onGyro(t, r[4].toDouble(), r[5].toDouble(), r[6].toDouble())
+                    "14" -> {
+                        d.onMag(t, r[4].toDouble(), r[5].toDouble(), r[6].toDouble())
+                    }
+                }
+            }
+            assertTrue("No watchdog or 30s preview block should hide later false events: $events", events.isEmpty())
+        }
+    }
+
 }

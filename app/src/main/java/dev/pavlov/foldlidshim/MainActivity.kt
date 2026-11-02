@@ -136,6 +136,7 @@ class MainActivity : androidx.appcompat.app.AppCompatActivity() {
         })
         controls.addView(CheckBox(this).apply {
             text = "Экономия датчиков"
+            contentDescription = "Экономия датчиков: выключать при погашенном экране"
             isChecked = Prefs.magnetEconomy(this@MainActivity)
             setOnCheckedChangeListener { _, checked ->
                 Prefs.setMagnetEconomy(this@MainActivity, checked)

@@ -75,7 +75,7 @@ class FoldService : Service() {
         Timeline.event(event)
         ShimState.magnetEvent = event
         handler.removeCallbacks(magnetWatchdog)
-        handler.postDelayed(magnetWatchdog, ((tNs + 1_500_000_000L - now + 999_999L) / 1_000_000L).coerceAtLeast(1))
+        handler.postDelayed(magnetWatchdog, ((tNs + magnetPreview.timeoutNs(closed) - now + 999_999L) / 1_000_000L).coerceAtLeast(1))
         evaluate()
         publish(force = true)
     }
@@ -621,7 +621,7 @@ class FoldService : Service() {
                     putExtra(StateActivity.EXTRA_ID, id)
                     putExtra(StateActivity.EXTRA_RECEIVER, receiver)
                     putExtra(StateActivity.EXTRA_DEADLINE, SystemClock.elapsedRealtime() + DIRECT_TIMEOUT_MS)
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_ANIMATION)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_ANIMATION or Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS)
                 })
                 return true
             } catch (e: Exception) {

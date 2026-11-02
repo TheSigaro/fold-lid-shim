@@ -15,8 +15,13 @@ data class MagnetVector(val x: Double, val y: Double, val z: Double) {
 
 data class MagnetParams(
     val windowNs: Long = 150_000_000L,
-    val closeThreshold: Double = 22.0,
-    val openThreshold: Double = 22.0,
+    val closeThreshold: Double = 20.0,
+    val openThreshold: Double = 18.0,
+    val maxPerpendicularRatio: Double = 0.65,
+    val earthRadius: Double = 42.0,
+    val magnetStrength: Double = 67.0,
+    val fieldTolerance: Double = 20.0,
+    val disturbanceHoldNs: Long = 30_000_000_000L,
     val gapNs: Long = 200_000_000L,
     val staleNs: Long = 1_000_000_000L,
     val flexNs: Long = 10_000_000_000L,
@@ -60,11 +65,17 @@ class MagnetFoldDetector(
     private var lastCalibrationSample: Long? = null
     private var lastFit: Long? = null
     private var blockedUntil = Long.MIN_VALUE
+    private var disturbedUntil = Long.MIN_VALUE
+    private var previewWasOpened = false
 
     init {
         require(params.windowNs > 0 && params.gapNs > 0 && params.staleNs >= params.gapNs)
         require(params.closeThreshold.isFinite() && params.closeThreshold > 0)
         require(params.openThreshold.isFinite() && params.openThreshold > 0)
+        require(params.maxPerpendicularRatio.isFinite() && params.maxPerpendicularRatio > 0)
+        require(params.earthRadius.isFinite() && params.earthRadius > 0)
+        require(params.magnetStrength.isFinite() && params.magnetStrength > 0)
+        require(params.fieldTolerance.isFinite() && params.fieldTolerance >= 0 && params.disturbanceHoldNs >= 0)
         require(params.hardIron.finite() && params.direction.finite() && params.direction.norm() > 0)
     }
 
@@ -75,10 +86,21 @@ class MagnetFoldDetector(
     }
 
     fun resetWindow() { mag.clear(); gyro.clear(); lastScore = 0.0 }
-    fun inhibitUntil(tNs: Long) { blockedUntil = tNs; resetWindow() }
+    fun inhibitUntil(tNs: Long) {
+        blockedUntil = tNs
+        didOpen = false
+        didClose = false
+        // A rejected preview must not consume the real hinge cycle.
+        openedSinceClosed = hinge == 180f || (hinge != 0f && (openedSinceClosed || previewWasOpened))
+        previewWasOpened = false
+        resetWindow()
+    }
 
     fun onHinge(tNs: Long, angle: Float) {
-        if (!angle.isFinite() || angle !in 0f..180f || !fresh(tNs) || tNs <= hingeTime) return
+        if (!angle.isFinite() || angle !in 0f..180f || tNs <= hingeTime) return
+        // The first on-change hinge can be cached from long before sensor registration.
+        if (hinge != null && !fresh(tNs)) return
+        latest = maxOf(latest, tNs)
         hingeTime = tNs
         if (angle == 90f) ninety = tNs
         if (angle == 0f && hinge != 0f) closedAt = tNs
@@ -102,7 +124,12 @@ class MagnetFoldDetector(
         val previous = mag.lastOrNull()
         if (previous != null && tNs <= previous.t) return
         if (previous != null && tNs - previous.t > params.gapNs) resetWindow()
-        if (hinge == 180f) collectCalibration(tNs, b)
+        // Even the closed phone cannot exceed Earth + lid magnet + tolerance.
+        // Keep a quiet interval after foreign fields: their removal can imitate a lid opening.
+        if ((b - hardIron).norm() > params.earthRadius + params.magnetStrength + params.fieldTolerance) {
+            disturbedUntil = tNs + params.disturbanceHoldNs
+        }
+        if (hinge == 180f && tNs >= disturbedUntil) collectCalibration(tNs, b)
         mag.addLast(Sample(tNs, b))
         val target = tNs - params.windowNs
         // Retain about 300 ms, including an anchor at or before t-W. No look-ahead.
@@ -110,10 +137,13 @@ class MagnetFoldDetector(
         while (mag.size > 1 && mag.elementAt(1).t <= oldest) mag.removeFirst()
         val anchor = mag.lastOrNull { it.t <= target } ?: return
         val earth = rotate(anchor.v - hardIron, anchor.t, tNs)
-        lastScore = ((b - hardIron) - earth).dot(direction)
-        if (tNs < blockedUntil) return
+        val delta = (b - hardIron) - earth
+        lastScore = delta.dot(direction)
+        if (tNs < blockedUntil || tNs < disturbedUntil) return
+        if ((delta - direction * lastScore).norm() > params.maxPerpendicularRatio * abs(lastScore)) return
         if (lastScore >= params.closeThreshold && hinge != null && hinge!! <= 90f &&
             ninety?.let { tNs - it in 0..params.flexNs } == true && !didClose && openedSinceClosed) {
+            previewWasOpened = openedSinceClosed
             didClose = true
             didOpen = false
             openedSinceClosed = false

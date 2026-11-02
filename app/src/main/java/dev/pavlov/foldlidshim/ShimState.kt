@@ -24,11 +24,10 @@ object ShimState {
     @Volatile var directConfirmationPending = false
     @Volatile var directRequestGeneration = 0L
     @Volatile var hallDiagnosis = HallDiagnosis.Result.UNKNOWN
-    @Volatile var autoStartAttempt: AutoStartAttempt? = null
     @Volatile var decision: String = "Служба не запущена"
     @Volatile var angle: Float? = null
     @Volatile var overrideClosed: Boolean = false
-    /** Last callback result from direct mode: "activated", "suspended", "canceled", or null. */
+    /** Last callback result from state requests: "activated", "suspended", "canceled", or null. */
     @Volatile var lastCallbackResult: String? = null
 
     private val listeners = CopyOnWriteArrayList<Runnable>()

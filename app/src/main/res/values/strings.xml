@@ -2,17 +2,6 @@
 <resources>
     <string name="app_name">FoldLidShim</string>
 
-    <string name="shizuku_label">Shizuku: %1$s</string>
-    <string name="shizuku_not_installed">не установлен</string>
-    <string name="shizuku_not_running">не запущен</string>
-    <string name="shizuku_no_permission">нет разрешения</string>
-    <string name="shizuku_ready">готов</string>
-    <string name="btn_request_permission">Выдать разрешение</string>
-
-    <string name="mode_label">Режим работы:</string>
-    <string name="mode_direct">Прямой (без Shizuku)</string>
-    <string name="mode_shizuku">Shizuku (по умолчанию)</string>
-
     <string name="overlay_status">Поверх других приложений: %1$s</string>
     <string name="overlay_yes">да</string>
     <string name="overlay_no">нет</string>
@@ -41,17 +30,12 @@
     <string name="thresholds_invalid">Нужно: 0 &lt;= закрыто &lt; открыто &lt;= 180</string>
 
     <string name="btn_test_now">Проверить сейчас</string>
-    <string name="test_started">state 0, через 3 секунды раскрытие по настройке</string>
-    <string name="test_started_direct">Прямой режим: запрос состояния</string>
-    <string name="test_unavailable">Shizuku не готов</string>
-    <string name="test_result">state %1$s: код %2$d</string>
-    <string name="test_failed">state %1$s: не выполнено</string>
+    <string name="test_started_direct">Запрос закрытия, через 3 секунды снятие запроса</string>
 
     <string name="btn_battery">Оптимизация батареи</string>
 
     <string name="notif_channel">Состояние шарнира</string>
     <string name="notif_title">FoldLidShim</string>
-    <string name="notif_waiting_shizuku">Ожидание Shizuku (%1$s)</string>
     <string name="notif_no_sensor">Датчики выбранного источника недоступны</string>
     <string name="notif_waiting_angle">Ожидание угла шарнира, override: %1$s</string>
     <string name="notif_status">Угол: %1$s, override: %2$s</string>
@@ -59,20 +43,14 @@
     <string name="source_samsung">samsung - Folding Angle (закрыт разрешением Samsung SSENSOR)</string>
     <string name="source_accel">accel - два акселерометра (sub закрыт SSENSOR)</string>
     <string name="source_hinge">hinge - TYPE_HINGE_ANGLE (по умолчанию)</string>
-    <string name="force_opened">Принудительное OPENED при раскрытии</string>
     <string name="invert_sub">Инверсия осей sub</string>
     <string name="axis_x">X</string>
     <string name="axis_y">Y</string>
     <string name="axis_z">Z</string>
     <string name="sensor_debug">Датчики\n%1$s\nТекущее решение: %2$s</string>
-    <string name="autostart_title">Автозапуск Shizuku</string>
-    <string name="adb_pairing">Сопряжение adb</string>
-    <string name="start_shizuku_now">Запустить Shizuku сейчас</string>
-    <string name="disable_adb">Выключать беспроводную отладку после запуска</string>
-    <string name="autostart_status">Ключ adb: %1$s\nWRITE_SECURE_SETTINGS: %2$s\nadb shell pm grant dev.pavlov.foldlidshim android.permission.WRITE_SECURE_SETTINGS\nПоследняя попытка: %3$s</string>
     <string name="accessibility_label">FoldLidShim - подтверждение экрана</string>
-    <string name="accessibility_description">Подтверждает только системный диалог переключения экрана при незавершённом запросе FoldLidShim в прямом режиме и включённой службе.</string>
+    <string name="accessibility_description">Подтверждает только системный диалог переключения экрана при незавершённом запросе FoldLidShim и включённой службе.</string>
     <string name="accessibility_status">Автоподтверждение: %1$s</string>
     <string name="accessibility_settings">Включить в настройках</string>
-    <string name="direct_explanation">Разрешите показ поверх других приложений и включите автоподтверждение. Диалог системы мелькнёт на долю секунды и будет подтверждён автоматически. Shizuku и Wi-Fi не нужны.</string>
+    <string name="direct_explanation">Разрешите показ поверх других приложений и включите автоподтверждение. Диалог системы мелькнёт на долю секунды и будет подтверждён автоматически.</string>
 </resources>

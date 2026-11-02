@@ -4,7 +4,7 @@ import android.content.Context
 import java.lang.reflect.Proxy
 import java.util.concurrent.Executor
 
-/** Observe commits only. Never requests a state and never binds Shizuku. */
+/** Observe commits only. Never requests a state. */
 internal class RecordingStateSource(private val onState: (Int?) -> Unit) {
     private var manager: Any? = null
     private var callback: Any? = null

@@ -13,7 +13,7 @@ class FoldConfirmAccessibilityService : AccessibilityService() {
     private var clickedDialog: Pair<Long, Int>? = null
 
     private fun allowed(): Boolean = ShimState.serviceRunning && Prefs.isEnabled(this) &&
-        Prefs.getMode(this) == Prefs.MODE_DIRECT && ShimState.directConfirmationPending
+        ShimState.directConfirmationPending
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (!allowed()) return

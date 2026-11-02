@@ -57,7 +57,7 @@ class StateActivity : Activity() {
         const val ACTION_CLOSED = "closed"
         const val ACTION_OPEN = "open"
         private const val FOCUS_TIMEOUT_MS = 3000L
-        const val OPEN_UNAVAILABLE = "Система не даёт приложению запросить открытие. При залипании «закрыто» нужен Shizuku"
+        const val OPEN_UNAVAILABLE = "Система не даёт приложению запросить открытие. При залипании «закрыто» нужен adb с компьютера"
     }
 
     private val handler = Handler(Looper.getMainLooper())

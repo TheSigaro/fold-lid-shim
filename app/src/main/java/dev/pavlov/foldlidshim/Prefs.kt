@@ -6,7 +6,6 @@ import android.content.SharedPreferences
 object Prefs {
     private const val NAME = "foldlidshim"
     private const val KEY_ENABLED = "enabled"
-    private const val KEY_MODE = "mode"
     private const val KEY_CLOSE = "close_deg"
     private const val KEY_OPEN = "open_deg"
 
@@ -66,17 +65,6 @@ object Prefs {
         if (ShimState.lastCallbackResult == RestartGuard.MESSAGE) ShimState.lastCallbackResult = null
     }
 
-    const val MODE_DIRECT = "direct"
-    const val MODE_SHIZUKU = "shizuku"
-
-    fun getMode(context: Context): String =
-        sp(context).getString(KEY_MODE, MODE_SHIZUKU) ?: MODE_SHIZUKU
-
-    fun setMode(context: Context, mode: String) {
-        val valid = if (mode == MODE_DIRECT || mode == MODE_SHIZUKU) true else false
-        if (valid) sp(context).edit().putString(KEY_MODE, mode).apply()
-    }
-
     fun angleSource(context: Context): String =
         sp(context).getString("angle_source", Config.DEFAULT_SOURCE)
             ?.takeIf { it in listOf(Config.SOURCE_SAMSUNG, Config.SOURCE_ACCEL, Config.SOURCE_HINGE) }
@@ -85,16 +73,6 @@ object Prefs {
     fun setAngleSource(context: Context, source: String) {
         if (source in listOf(Config.SOURCE_SAMSUNG, Config.SOURCE_ACCEL, Config.SOURCE_HINGE))
             sp(context).edit().putString("angle_source", source).apply()
-    }
-
-    fun disableWirelessAfterStart(context: Context): Boolean = sp(context).getBoolean("disable_adb_after_start", true)
-    fun setDisableWirelessAfterStart(context: Context, value: Boolean) {
-        sp(context).edit().putBoolean("disable_adb_after_start", value).apply()
-    }
-
-    fun forceOpened(context: Context): Boolean = sp(context).getBoolean("force_opened", true)
-    fun setForceOpened(context: Context, value: Boolean) {
-        sp(context).edit().putBoolean("force_opened", value).apply()
     }
 
     fun invertAxes(context: Context): BooleanArray = BooleanArray(3) {

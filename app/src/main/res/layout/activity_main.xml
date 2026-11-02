@@ -15,33 +15,16 @@
     </com.google.android.material.card.MaterialCardView>
     <com.google.android.material.card.MaterialCardView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginBottom="16dp" app:cardCornerRadius="20dp">
       <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:padding="16dp">
-        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Shizuku" android:textSize="22sp" android:layout_marginBottom="8dp" />
-        <TextView android:id="@+id/tvShizuku" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="0dp" android:textSize="18sp" />
-        <com.google.android.material.button.MaterialButton android:id="@+id/btnPermission" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/btn_request_permission" android:layout_marginTop="0dp" />
-        <com.google.android.material.button.MaterialButton android:id="@+id/btnOpenShizuku" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Запустить Shizuku" />
-        <TextView android:id="@+id/tvAutoStart" android:layout_width="match_parent" android:layout_height="wrap_content" android:textIsSelectable="true" android:layout_marginTop="0dp" />
-        <com.google.android.material.button.MaterialButton android:id="@+id/btnImportKey" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Импортировать ключ adb" />
-        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="" android:textSize="16sp" android:layout_marginBottom="8dp" android:id="@+id/tvImportHint" />
-        <com.google.android.material.button.MaterialButton android:id="@+id/btnStartShizuku" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Запустить автоматически" android:layout_marginTop="0dp" />
-        <com.google.android.material.button.MaterialButton android:id="@+id/btnAdbPairing" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/adb_pairing" android:layout_marginTop="0dp" />
-      </LinearLayout>
-    </com.google.android.material.card.MaterialCardView>
-    <com.google.android.material.card.MaterialCardView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginBottom="16dp" app:cardCornerRadius="20dp">
-      <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:padding="16dp">
         <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Ручное управление" android:textSize="22sp" android:layout_marginBottom="8dp" />
         <com.google.android.material.button.MaterialButton android:id="@+id/btnForceOpen" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Открыть принудительно" />
         <com.google.android.material.button.MaterialButton android:id="@+id/btnForceClose" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Закрыть принудительно" />
-        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Добавьте плитку «Экран Fold» в быстрые настройки. Она переключает экраны через Shizuku, даже когда угла нет." android:textSize="16sp" android:layout_marginBottom="8dp" />
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Добавьте плитку «Экран Fold» в быстрые настройки. Она снимает запрос закрытия, даже когда угла нет." android:textSize="16sp" android:layout_marginBottom="8dp" />
         <com.google.android.material.button.MaterialButton android:id="@+id/btnTest" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="0dp" android:text="@string/btn_test_now" />
       </LinearLayout>
     </com.google.android.material.card.MaterialCardView>
     <com.google.android.material.card.MaterialCardView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginBottom="16dp" app:cardCornerRadius="20dp">
       <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:padding="16dp">
         <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Настройки" android:textSize="22sp" android:layout_marginBottom="8dp" />
-        <RadioGroup android:id="@+id/rgMode" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:layout_marginTop="0dp">
-          <RadioButton android:id="@+id/rbDirect" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/mode_direct" />
-          <RadioButton android:id="@+id/rbShizuku" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/mode_shizuku" />
-        </RadioGroup>
         <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/direct_explanation" android:textSize="16sp" android:layout_marginBottom="8dp" />
         <TextView android:id="@+id/tvAccessibility" android:layout_width="match_parent" android:layout_height="wrap_content" android:textSize="16sp" />
         <Button android:id="@+id/btnAccessibility" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/accessibility_settings" />
@@ -56,8 +39,6 @@
         <EditText android:id="@+id/etClose" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="0dp" android:hint="@string/hint_close_deg" android:importantForAutofill="no" android:inputType="numberDecimal" />
         <EditText android:id="@+id/etOpen" android:layout_width="match_parent" android:layout_height="wrap_content" android:hint="@string/hint_open_deg" android:importantForAutofill="no" android:inputType="numberDecimal" android:layout_marginTop="0dp" />
         <com.google.android.material.button.MaterialButton android:id="@+id/btnSave" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/btn_save_thresholds" android:layout_marginTop="0dp" />
-        <com.google.android.material.materialswitch.MaterialSwitch android:id="@+id/swForceOpened" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/force_opened" android:layout_marginTop="0dp" />
-        <com.google.android.material.materialswitch.MaterialSwitch android:id="@+id/swDisableAdb" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/disable_adb" android:layout_marginTop="0dp" />
         <com.google.android.material.button.MaterialButton android:id="@+id/btnBattery" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/btn_battery" android:layout_marginTop="0dp" />
       </LinearLayout>
     </com.google.android.material.card.MaterialCardView>
@@ -76,8 +57,7 @@
     <com.google.android.material.card.MaterialCardView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginBottom="16dp" app:cardCornerRadius="20dp">
       <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:padding="16dp">
         <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Шторка уведомлений" android:textSize="22sp" android:layout_marginBottom="8dp" />
-        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Приложение не запрашивает разрешение на уведомления. При отозванном разрешении уведомление службы скрыто из шторки. Уведомление «Shizuku работает» отключается отдельно." android:textSize="16sp" android:layout_marginBottom="8dp" />
-        <com.google.android.material.button.MaterialButton android:id="@+id/btnShizukuNotifications" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Скрыть уведомление Shizuku" />
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Приложение не запрашивает разрешение на уведомления. При отозванном разрешении уведомление службы скрыто из шторки." android:textSize="16sp" android:layout_marginBottom="8dp" />
       </LinearLayout>
     </com.google.android.material.card.MaterialCardView>
   </LinearLayout>

@@ -1,7 +1,0 @@
-cmake_minimum_required(VERSION 3.22.1)
-project(foldlidshim_adb)
-set(CMAKE_CXX_STANDARD 17)
-find_package(boringssl REQUIRED CONFIG)
-add_library(adb SHARED adb_pairing.cpp)
-target_link_libraries(adb log boringssl::crypto_static)
-target_link_options(adb PRIVATE "-Wl,-z,max-page-size=16384")

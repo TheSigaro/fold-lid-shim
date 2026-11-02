@@ -11,7 +11,5 @@ class App : Application() {
         } catch (_: Exception) {
         }
         Timeline.init(this)
-        ShizukuBridge.setDirectMode(Prefs.getMode(this) == Prefs.MODE_DIRECT)
-        if (Prefs.getMode(this) == Prefs.MODE_SHIZUKU) ShizukuBridge.init()
     }
 }

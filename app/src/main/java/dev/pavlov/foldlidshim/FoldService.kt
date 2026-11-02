@@ -6,6 +6,9 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
+import android.content.IntentFilter
+import android.os.PowerManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
@@ -28,6 +31,33 @@ class FoldService : Service() {
     private var angleSensors: AngleSensors? = null
     private var magnetSensors: MagnetSensors? = null
     private val magnetPreview = MagnetPreview()
+    private val sleepPolicy = SleepPolicy()
+    private val hingeBounce = HingeBounce()
+    private var bounceRequestAt: Long? = null
+    private val bounceTimeout = Runnable { evaluateDirect(); publish(force = true) }
+    private lateinit var power: PowerManager
+    private var deferredLogged = false
+    private val screenReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (stopping) return
+            val now = SystemClock.elapsedRealtime()
+            if (intent?.action == Intent.ACTION_SCREEN_OFF) {
+                sleepPolicy.screenOff(now)
+                if (pendingAction == StateActivity.ACTION_CLOSED) clearPendingAction()
+            } else if (intent?.action == Intent.ACTION_SCREEN_ON) {
+                when (sleepPolicy.screenOn(now, magnetPreview.desiredClosed ?: motion.closed,
+                    DirectStateController.hasClosedRequest)) {
+                    SleepPolicy.Wake.LOCK -> {
+                        Timeline.event("sleep cancel: spurious wake after ${now - (sleepPolicy.sleepCancelAt ?: now)} ms, lock")
+                        if (!FoldConfirmAccessibilityService.lockScreen()) Timeline.event("lock unavailable")
+                    }
+                    SleepPolicy.Wake.REQUEST_CLOSED -> Timeline.event("wake: request CLOSED")
+                    SleepPolicy.Wake.NONE -> Unit
+                }
+            }
+            evaluateDirect()
+        }
+    }
     private var realHingeAngle: Float? = null
     private var realHingeNs = Long.MIN_VALUE
     private val magnetWatchdog = Runnable {
@@ -68,6 +98,7 @@ class FoldService : Service() {
             ignored("pending or inhibited")
             return
         }
+        if (!closed) hingeBounce.release()
         val event = "magnet ${if (closed) "closing" else "opening"} timestampNs=$tNs score=$score"
         Timeline.event(event)
         ShimState.magnetEvent = event
@@ -127,7 +158,21 @@ class FoldService : Service() {
     private val retryCancel = Runnable { evaluateDirect(); publish(force = true) }
     private fun evaluateDirect() {
         if (stopping || !directReady) return
-        val desiredClosed = magnetPreview.desiredClosed ?: motion.closed
+        val now = SystemClock.elapsedRealtime()
+        DirectStateController.closedSentAt?.let {
+            if (bounceRequestAt != it) { bounceRequestAt = it; hingeBounce.requested(it) }
+        }
+        val rawClosed = magnetPreview.desiredClosed ?: motion.closed
+        val desiredClosed = if (currentSource == Config.SOURCE_HINGE) {
+            hingeBounce.closed(now, rawClosed, lastAngle ?: 0f,
+                lastAngle?.let { it <= Prefs.closeDeg(this) } == true,
+                magnetPreview.pending?.closed == false)
+        } else rawClosed
+        hingeBounce.ignoredAfterMs?.let {
+            Timeline.event("hinge bounce ignored angle=${hingeBounce.ignoredAngle} afterMs=$it")
+        }
+        handler.removeCallbacks(bounceTimeout)
+        hingeBounce.deadline?.let { handler.postDelayed(bounceTimeout, (it - now).coerceAtLeast(1L)) }
         val angle = magnetPreview.pending?.let { if (it.closed) 0f else 90f } ?: lastAngle ?: return
         ShimState.decision = (if (desiredClosed) "CLOSED" else "Снять CLOSED") +
             (if (magnetPreview.pending != null) " (магнитометр)" else "")
@@ -150,6 +195,11 @@ class FoldService : Service() {
             recoveryPending = false
             if (pendingAction == StateActivity.ACTION_OPEN) clearPendingAction()
         }
+        val wakeOpen = sleepPolicy.desired(desiredClosed, power.isInteractive, owns)
+        if (wakeOpen && !stopAfterCancel && pendingAction == null) {
+            Timeline.event("wake on open")
+            launchAction(StateActivity.ACTION_WAKE)
+        }
         val needsCancel = owns || recoveryPending
         handler.removeCallbacks(retryCancel)
         if (opening && needsCancel) {
@@ -167,6 +217,12 @@ class FoldService : Service() {
             ShimState.lastCallbackResult = StateActivity.OPEN_UNAVAILABLE
             return
         }
+        if (desiredClosed && !sleepPolicy.allowClosed(power.isInteractive)) {
+            if (!deferredLogged) Timeline.event("closed deferred: screen off")
+            deferredLogged = true
+            return
+        }
+        deferredLogged = false
         if (desiredClosed && !motion.failedClosed) applyState(true)
     }
 
@@ -204,6 +260,19 @@ class FoldService : Service() {
 
         thread = HandlerThread("FoldLidShim-worker").also { it.start() }
         handler = Handler(thread.looper)
+        power = getSystemService(PowerManager::class.java)
+        DirectStateController.onCanceled = { generation, at, interactive ->
+            handler.post {
+                if (!stopping && sleepPolicy.canceled(at, interactive)) {
+                    Timeline.event("sleep cancel generation=$generation")
+                    if (pendingAction == StateActivity.ACTION_CLOSED) clearPendingAction()
+                }
+            }
+        }
+        registerReceiver(screenReceiver, IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_SCREEN_OFF)
+        }, null, handler, Context.RECEIVER_NOT_EXPORTED)
         ShimState.addListener(stateListener)
 
         Log.i(Config.TAG, "Starting screen switching")
@@ -292,6 +361,8 @@ class FoldService : Service() {
 
     override fun onDestroy() {
         stopping = true
+        unregisterReceiver(screenReceiver)
+        DirectStateController.onCanceled = null
         ShimState.serviceRunning = false
         ShimState.directConfirmationPending = false
         ShimState.removeListener(stateListener)
@@ -313,6 +384,8 @@ class FoldService : Service() {
     }
 
     private fun registerAngleSource() {
+        hingeBounce.release()
+        handler.removeCallbacks(bounceTimeout)
         angleSensors?.stop()
         currentSource = Prefs.angleSource(this)
         currentInvert = Prefs.invertAxes(this)
@@ -381,6 +454,11 @@ class FoldService : Service() {
     private fun completeDirectAction(success: Boolean, error: String?) {
         val action = pendingAction ?: return
         clearPendingAction()
+        if (action == StateActivity.ACTION_WAKE) {
+            Timeline.event("activity result wake success=$success error=$error")
+            evaluateDirect()
+            return
+        }
         val closed = action == StateActivity.ACTION_CLOSED
         // A request can have executed just before its activity result times out.
         // hasRequest means accepted (possibly suspended), and still needs cancellation.
@@ -412,8 +490,13 @@ class FoldService : Service() {
             return true
         }
         Timeline.event("decision ${if (closed) "CLOSED" else "CANCEL"}")
+        return launchAction(if (closed) StateActivity.ACTION_CLOSED else StateActivity.ACTION_OPEN)
+    }
+
+    private fun launchAction(action: String): Boolean {
+        if (pendingAction != null) return false
         val id = UUID.randomUUID().toString()
-        pendingAction = if (closed) StateActivity.ACTION_CLOSED else StateActivity.ACTION_OPEN
+        pendingAction = action
         pendingId = id
         StateActivity.registerAction(id)
         val receiver = object : ResultReceiver(handler) {

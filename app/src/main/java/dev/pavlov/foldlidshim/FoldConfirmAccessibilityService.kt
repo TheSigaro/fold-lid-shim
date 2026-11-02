@@ -4,6 +4,7 @@ import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityManager
@@ -69,9 +70,32 @@ class FoldConfirmAccessibilityService : AccessibilityService() {
         }
     }
 
+    override fun onServiceConnected() {
+        super.onServiceConnected()
+        instance = this
+    }
+
+    override fun onUnbind(intent: Intent?): Boolean {
+        if (instance === this) instance = null
+        return super.onUnbind(intent)
+    }
+
+    override fun onDestroy() {
+        if (instance === this) instance = null
+        super.onDestroy()
+    }
+
     override fun onInterrupt() = Unit
 
     companion object {
+        @Volatile private var instance: FoldConfirmAccessibilityService? = null
+
+        fun lockScreen(): Boolean = try {
+            instance?.performGlobalAction(GLOBAL_ACTION_LOCK_SCREEN) == true
+        } catch (_: Exception) {
+            false
+        }
+
         private var loggedDialog = false
         private const val SYSTEM_UI = "com.android.systemui"
 

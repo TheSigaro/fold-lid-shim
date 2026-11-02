@@ -2,6 +2,8 @@ package dev.pavlov.foldlidshim
 
 import android.content.Context
 import android.os.Handler
+import android.os.PowerManager
+import android.os.SystemClock
 import android.os.Looper
 import android.util.Log
 import java.lang.reflect.InvocationTargetException
@@ -18,10 +20,14 @@ object DirectStateController {
     @Volatile var manualOpenGeneration = 0L
         private set
     fun manualOpen() { manualOpenGeneration++ }
+    @Volatile var closedSentAt: Long? = null
+        private set
+    @Volatile var onCanceled: ((Long, Long, Boolean) -> Unit)? = null
     private var generation = 0L
     private var requestSequence = 0L
     private val main = Handler(Looper.getMainLooper())
     @Volatile private var requestedState: Int? = null
+    private var applicationPower: PowerManager? = null
     private var stateCallbackRegistered = false
     private var stateCallback: Any? = null
     val hasClosedRequest: Boolean get() = hasRequest && requestedState == 0
@@ -111,6 +117,7 @@ object DirectStateController {
                     }, 5000L)
                     ShimState.lastCallbackResult = "request accepted, waiting for activation"
                     try {
+                        closedSentAt = SystemClock.elapsedRealtime()
                         Timeline.event("requestState send state=$state generation=$requestGeneration flags=0")
                         managerClassRef!!.getMethod(
                             "requestState",
@@ -332,6 +339,8 @@ object DirectStateController {
                             ShimState.lastCallbackResult = "suspended"
                         }
                         "onRequestCanceled" -> {
+                            onCanceled?.invoke(requestGeneration, SystemClock.elapsedRealtime(),
+                                applicationPower?.isInteractive == true)
                             requestedState = null
                             hasRequest = false
                             ShimState.overrideClosed = false
@@ -361,6 +370,7 @@ object DirectStateController {
      */
     @Synchronized
     fun tryRegisterCallback(context: Context) {
+        applicationPower = context.getSystemService(PowerManager::class.java)
         if (stateCallbackRegistered || !available(context) || stateCallbackClassRef == null) return
         try {
             val manager = getManagerInstance(context)

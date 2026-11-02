@@ -1,6 +1,8 @@
 package dev.pavlov.foldlidshim
 
 import android.app.Activity
+import android.content.res.Configuration
+import android.os.PowerManager
 import android.content.Intent
 import android.os.Bundle
 import android.os.Handler
@@ -56,6 +58,7 @@ class StateActivity : Activity() {
         const val EXTRA_ACTION = "action"
         const val ACTION_CLOSED = "closed"
         const val ACTION_OPEN = "open"
+        const val ACTION_WAKE = "wake"
         private const val FOCUS_TIMEOUT_MS = 3000L
         const val OPEN_UNAVAILABLE = "Система не даёт приложению запросить открытие. При залипании «закрыто» нужен adb с компьютера"
     }
@@ -78,6 +81,11 @@ class StateActivity : Activity() {
         ShimState.addListener(stateChanged)
         receiver = intent.getParcelableExtra(EXTRA_RECEIVER, ResultReceiver::class.java)
         Timeline.event("StateActivity.onCreate action=${intent?.getStringExtra(EXTRA_ACTION)}")
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        Timeline.event("StateActivity config changed")
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -132,7 +140,12 @@ class StateActivity : Activity() {
                 } else {
                     activeId = null
                     success = when (action) {
-                        ACTION_CLOSED -> DirectStateController.applyDesired(this, true)
+                        ACTION_CLOSED -> if (getSystemService(PowerManager::class.java).isInteractive)
+                            DirectStateController.applyDesired(this, true) else {
+                            Timeline.event("closed deferred: screen off")
+                            true
+                        }
+                        ACTION_WAKE -> true
                         ACTION_OPEN -> {
                             if (receiver == null) DirectStateController.manualOpen()
                             DirectStateController.cancel(this)

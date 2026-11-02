@@ -151,29 +151,36 @@ class MagnetFoldDetectorReplayTest {
     }
 
     @Test fun scenarioRecordingPreservesV13CoverageWithoutLaptopEvents() {
-        // Baseline: unmodified v13 (930becb), Python replay on sensors-4-trim.csv,
-        // before report/test changes. Entries follow all 18 hinge transitions.
+        // Preserve all v13 leads and protect the three transitions recovered with a 10s
+        // foreign-field hold. Python replay baselines follow all 18 hinge transitions,
+        // including the production close=20/open=18 pair.
         val baselineLeads = mapOf(
-            18.0 to listOf<Double?>(166.607500, 256.617760, 276.613073, 236.606562,
+            (18.0 to 18.0) to listOf<Double?>(166.607500, 256.617760, 276.613073, 236.606562,
                 186.614375, 286.614583, null, 236.617031, null, null, null,
-                366.626823, 396.816510, 316.643021, 186.608906, null, null, null),
-            20.0 to listOf<Double?>(156.607500, 246.617760, 276.613073, 216.606562,
+                366.626823, 396.816510, 316.643021, 186.608906, 296.619375, 166.641250, 316.630937),
+            (20.0 to 20.0) to listOf<Double?>(156.607500, 246.617760, 276.613073, 216.606562,
                 176.614375, 226.614583, null, null, null, null, null,
-                356.626823, 366.816510, 306.643021, 176.608906, null, null, null),
-            22.0 to listOf<Double?>(156.607500, 246.617760, 276.613073, 196.606562,
+                356.626823, 366.816510, 306.643021, 176.608906, 296.619375, 156.641250, 316.630937),
+            (22.0 to 22.0) to listOf<Double?>(156.607500, 246.617760, 276.613073, 196.606562,
                 176.614375, 216.614583, null, null, null, null, null,
-                316.626823, 356.816510, 306.643021, 176.608906, null, null, null)
+                316.626823, 356.816510, 306.643021, 176.608906, 296.619375, 156.641250, 306.630937),
+            (20.0 to 18.0) to listOf<Double?>(156.607500, 256.617760, 276.613073, 236.606562,
+                176.614375, 286.614583, null, 236.617031, null, null, null,
+                366.626823, 366.816510, 316.643021, 176.608906, 296.619375, 156.641250, 316.630937)
         )
-        val baselineCounts = mapOf(18.0 to 11, 20.0 to 10, 22.0 to 10)
+        val baselineCounts = mapOf((18.0 to 18.0) to 14, (20.0 to 20.0) to 13,
+            (22.0 to 22.0) to 13, (20.0 to 18.0) to 14)
         val rows = javaClass.getResourceAsStream("/sensors-4-trim.csv")!!.bufferedReader()
             .use { it.readLines() }.map { it.split(';') }
         val origin = rows.first { it[2] == "header" }[0].toLong()
-        for ((threshold, baseline) in baselineLeads) {
+        for ((thresholds, baseline) in baselineLeads) {
+            val (closeThreshold, openThreshold) = thresholds
+            val threshold = "$closeThreshold/$openThreshold"
             val events = mutableListOf<Event>()
             val transitions = mutableListOf<Pair<Boolean, Long>>()
             var previous: Float? = null
             val detector = MagnetFoldDetector(
-                MagnetParams(closeThreshold = threshold, openThreshold = threshold),
+                MagnetParams(closeThreshold = closeThreshold, openThreshold = openThreshold),
                 object : MagnetFoldDetector.Listener {
                     override fun closing(tNs: Long, score: Double) { events += Event(true, tNs, score) }
                     override fun opening(tNs: Long, score: Double) { events += Event(false, tNs, score) }
@@ -194,7 +201,7 @@ class MagnetFoldDetectorReplayTest {
             }
             assertEquals("All scenario transitions", 18, transitions.size)
             assertTrue("Coverage degraded at T=$threshold: $events",
-                events.size >= baselineCounts.getValue(threshold))
+                events.size >= baselineCounts.getValue(thresholds))
             for (event in events) assertTrue("False event at T=$threshold: $event", transitions.any {
                 it.first == event.closed && abs(it.second - event.t) <= 1_500_000_000L
             })

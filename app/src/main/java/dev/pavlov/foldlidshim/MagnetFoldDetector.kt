@@ -26,7 +26,7 @@ data class MagnetParams(
     val earthRadius: Double = 42.0,
     val magnetStrength: Double = 67.0,
     val fieldTolerance: Double = 20.0,
-    val disturbanceHoldNs: Long = 30_000_000_000L,
+    val disturbanceHoldNs: Long = 10_000_000_000L,
     val gapNs: Long = 200_000_000L,
     val staleNs: Long = 1_000_000_000L,
     val flexNs: Long = 10_000_000_000L,

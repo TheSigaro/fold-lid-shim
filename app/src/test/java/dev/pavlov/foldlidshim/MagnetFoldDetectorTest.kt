@@ -194,10 +194,10 @@ class MagnetFoldDetectorTest {
         vector(d, 1210, 140.0) // Outside even the closed sphere envelope.
         for (ms in 1220L..1400 step 10) vector(d, ms, 40.0)
         assertTrue(c.opening.isEmpty())
-        for (ms in 30000L..30500 step 10) vector(d, ms, if (ms < 30300) 100.0 else 40.0)
+        for (ms in 10000L..10500 step 10) vector(d, ms, if (ms < 10300) 100.0 else 40.0)
         assertTrue(c.opening.isEmpty())
-        for (ms in 31700L..32400 step 10) vector(d, ms, if (ms < 32200) 100.0 else 40.0)
-        assertEquals(listOf(32_200_000_000L), c.opening)
+        for (ms in 11700L..12400 step 10) vector(d, ms, if (ms < 12200) 100.0 else 40.0)
+        assertEquals(listOf(12_200_000_000L), c.opening)
     }
 
     @Test fun rollbackRearmsBothDirectionsWithoutAnotherConfirmingHinge() {

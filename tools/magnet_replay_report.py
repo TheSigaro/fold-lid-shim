@@ -3,6 +3,7 @@
 import argparse
 import csv
 import math
+import json
 from collections import deque
 
 
@@ -89,12 +90,17 @@ def transport(v, start, end, gyro):
     return rotate(v, omega, (end - time) / 1e9)
 
 
+DISTURBANCE_HOLD_NS = 10_000_000_000
+HOLD_SECONDS = (3, 4, 5, 6, 8, 10, 12, 15, 20, 25, 30)
+THRESHOLDS = (18, 20, 22, None)
+
 PHANTOM_HOLD_NS = 500_000_000
 QUIET_GYRO = 0.5
 QUIET_OPEN_THRESHOLD = 35
 
 
-def replay(path, threshold=None, filtered=True, safeguards=True, phantom_hold_ns=PHANTOM_HOLD_NS):
+def replay(path, threshold=None, filtered=True, safeguards=True, phantom_hold_ns=PHANTOM_HOLD_NS,
+           hold=DISTURBANCE_HOLD_NS):
     window_ms = 150
     close_threshold = 20 if threshold is None else threshold; open_threshold = 18 if threshold is None else threshold
     h = (67.0, -30.7, 11.9)
@@ -112,7 +118,7 @@ def replay(path, threshold=None, filtered=True, safeguards=True, phantom_hold_ns
     features = []
     last_hinge = -1
     disturbed_until = phantom_until = field_until = -10**30
-    field_first = None
+    field_first = field_last = None
     with open(path, newline="", encoding="utf-8") as f:
         for r in csv.reader(f, delimiter=";"):
             t, kind = int(r[1]), r[2]
@@ -158,7 +164,8 @@ def replay(path, threshold=None, filtered=True, safeguards=True, phantom_hold_ns
             if norm(sub(v, h)) > 42 + 67 + 20:
                 if field_first is None:
                     field_first = t
-                field_until = t + 30_000_000_000
+                field_last = t
+                field_until = t + hold
                 disturbed_until = field_until
             if hinge == 180 and (not filtered or t >= disturbed_until):
                 if last_fit is None:
@@ -215,6 +222,7 @@ def replay(path, threshold=None, filtered=True, safeguards=True, phantom_hold_ns
             features.append(dict(close_gate=close_gate, open_gate=open_gate, ninety=ninety,
                                  opened_since_closed=opened_since_closed, closed_at=closed_at,
                                  did_close=did_close, did_open=did_open, field_first=field_first,
+                                 field_last=field_last,
                                  field_until=field_until, field_norm=norm(after), pre_rise=pre_rise, phantom=phantom, max_gyro=max_gyro,
                                  open_threshold=candidate_threshold, quiet_rejected=quiet_rejected,
                                  recent_phantom=t < phantom_until, phantom_until=phantom_until,
@@ -337,7 +345,7 @@ def report(path):
     _, _, _, events, features, _, _ = replay(path)
     outside = lambda f: all(abs(f["t"] - t) > 1_500_000_000 for _, t in transitions)
     print("Time is relative to header.receivedNs; hinge origin offset=%.6fs" % ((origin-header)/1e9))
-    print("W=150ms; T_close=20 T_open=18; k=0.65; R=42; m0=67; foreign field limit=129uT; quiet interval=30s")
+    print("W=150ms; T_close=20 T_open=18; k=0.65; R=42; m0=67; foreign field limit=129uT; quiet interval=%gs" % (DISTURBANCE_HOLD_NS / 1e9))
     print(f"phantom hold={PHANTOM_HOLD_NS / 1e9:g}s; no opening latch; pre-window rise <=10uT; quiet gyro <0.5rad/s uses opening=35uT")
     print("Recordings have no screen broadcasts; sensors are replayed continuously.")
     print("Baseline v11 events:", [(c, round((t-header)/1e9, 4), round(s, 3)) for c,t,s in baseline])
@@ -433,12 +441,129 @@ def report(path):
     assert not failures, "\n".join(failures)
 
 
+def hold_summary(path, threshold, seconds):
+    """Replay with live latches and calibration; inspect every independent blocker."""
+    _, header, transitions, events, features, attempts, fits = replay(
+        path, threshold, hold=seconds * 1_000_000_000)
+    close, opening = (20, 18) if threshold is None else (threshold, threshold)
+    def target(closed, t):
+        return next((tt for c, tt in transitions
+                     if c == closed and abs(t-tt) <= 1_500_000_000), None)
+    true, false, only = [], [], []
+    for closed, t, score in events:
+        tt = target(closed, t)
+        event = dict(closed=closed, time=(t-header)/1e9, score=score)
+        if tt is None:
+            f = next(f for f in features if f["t"] == t)
+            event["blockers"] = rejection_reasons(f, closed, close if closed else opening, header)
+            event["passed"] = "threshold,direction,hinge gates,latch,phantom" + (
+                "" if closed else ",pre-rise,quiet")
+            false.append(event)
+        else:
+            event.update(hinge=(tt-header)/1e9, lead_ms=(tt-t)/1e6)
+            true.append(event)
+    for f in features:
+        closed = f["score"] > 0
+        reasons = rejection_reasons(f, closed, close if closed else opening, header)
+        if reasons.startswith("field129 ") and ";" not in reasons:
+            only.append(dict(time=f["seconds"], score=f["score"], closed=closed,
+                             since_field=(f["t"]-f["field_last"])/1e9,
+                             true=target(closed, f["t"]) is not None))
+    return dict(path=str(path), threshold="20/18" if threshold is None else str(threshold),
+                hold=seconds, true=true, false=false, only=only, attempts=attempts, fits=fits)
+
+
+def hold_sweep(paths, event_free_phases=()):
+    """Apply the selection rule to the supplied recordings without fixture timestamps."""
+    results = []
+    print("Hold sweep: continuous sensors, no preview watchdog/rollback. Times from header.")
+    print("Selection applies only to the supplied recordings and event-free phases.")
+    print("| Recording | T close/open | Hold s | True | False: time / s / passed checks | True hinge: lead ms |")
+    print("| --- | --- | ---: | ---: | --- | --- |")
+    for path in paths:
+        for threshold in THRESHOLDS:
+            for seconds in HOLD_SECONDS:
+                r = hold_summary(path, threshold, seconds)
+                results.append(r)
+                false = "; ".join(f"{e['time']:.6f} / {e['score']:.3f} / {e['passed']} (blockers={e['blockers']})"
+                                  for e in r["false"]) or "none"
+                leads = "; ".join(f"{e['hinge']:.6f}: {e['lead_ms']:.6f}" for e in r["true"]) or "none"
+                print(f"| {path} | {r['threshold']} | {seconds} | {len(r['true'])} | {false} | {leads} |", flush=True)
+    # Only false candidates set the safety margin; true candidates measure recovered coverage.
+    maxima = {str(p): max((f["since_field"] for r in results if r["path"] == str(p)
+                          for f in r["only"] if not f["true"]), default=0) for p in paths}
+    required = max(5, max(maxima.values(), default=0) + 5)
+    for is_true, label in ((False, "False"), (True, "True")):
+        print(f"{label} only-field candidates, every sample "
+              "(H=30 baseline; additional H-dependent candidates follow):")
+        for path in paths:
+            if not any(f["true"] == is_true for r in results if r["path"] == str(path)
+                       for f in r["only"]):
+                print(f"  {path}: none at any hold or threshold")
+        seen = set()
+        for r in sorted(results, key=lambda r: -r["hold"]):
+            for f in r["only"]:
+                if f["true"] != is_true:
+                    continue
+                key = (r["path"], r["threshold"], f["time"], f["score"], f["since_field"])
+                if key in seen:
+                    continue
+                seen.add(key)
+                print(f"  {r['path']} T={r['threshold']} H={r['hold']}: "
+                      f"t={f['time']:.6f} s={f['score']:.3f} "
+                      f"since129={f['since_field']:.6f}s true={f['true']}")
+    phase_failures = []
+    for path, start, end in event_free_phases:
+        for r in results:
+            if r["path"] == path and any(float(start) <= e["time"] <= float(end)
+                                         for e in r["true"] + r["false"]):
+                phase_failures.append((r["hold"], r["threshold"], path))
+    eligible = []
+    for seconds in HOLD_SECONDS:
+        runs = [r for r in results if r["hold"] == seconds]
+        safe = True
+        for r in runs:
+            base = next(b for b in results if b["path"] == r["path"]
+                        and b["threshold"] == r["threshold"] and b["hold"] == 30)
+            if r["false"] or any(not any(e["closed"] == b["closed"] and e["hinge"] == b["hinge"]
+                                           and e["lead_ms"] >= b["lead_ms"] - 30
+                                           for e in r["true"]) for b in base["true"]):
+                safe = False
+        if safe and seconds >= required and not any(h == seconds for h, _, _ in phase_failures):
+            eligible.append(seconds)
+    selected = min(eligible, default=None)
+    print("Calibration attempts and accepted fits for every H and threshold:")
+    for r in results:
+        print(f"  {r['path']} T={r['threshold']} H={r['hold']}: "
+              f"attempts={r['attempts']} accepted={r['fits']}")
+    print(f"Maximum false-only since129 by recording: {maxima}; required hold >= {required:.6f}s")
+    print(f"Selected hold: {selected}; a reduction is allowed only below 30s.")
+    print(f"Event-free phases: {event_free_phases}; violations (H, T, recording): {phase_failures}")
+    return dict(results=results, maxima=maxima, required=required, selected=selected, phase_failures=phase_failures)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("fixture")
+    parser.add_argument("fixture", nargs="?")
+    parser.add_argument("--hold-sweep", nargs="+", metavar="CSV",
+                        help="Sweep all hold lengths and thresholds across the supplied recordings")
+    parser.add_argument("--event-free-phase", nargs=3, action="append", default=[],
+                        metavar=("CSV", "START", "END"),
+                        help="Require no events in this header-relative interval when selecting H")
+    parser.add_argument("--sweep-json", help="Also write sweep measurements as JSON")
     parser.add_argument("--economy", action="store_true",
                         help="Assume an interactive screen; fixtures contain no screen broadcasts")
     args = parser.parse_args()
     if args.economy:
         print("Screen economy: interactive screen assumed throughout this recording.")
-    report(args.fixture)
+    if args.hold_sweep:
+        paths = args.hold_sweep
+    elif args.fixture:
+        report(args.fixture)
+        paths = [args.fixture]
+    else:
+        parser.error("provide a fixture or --hold-sweep CSV ...")
+    measurements = hold_sweep(paths, args.event_free_phase)
+    if args.sweep_json:
+        with open(args.sweep_json, "w", encoding="utf-8") as output:
+            json.dump(measurements, output, ensure_ascii=False, indent=2)

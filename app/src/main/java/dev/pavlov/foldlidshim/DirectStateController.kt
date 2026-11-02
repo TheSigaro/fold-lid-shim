@@ -26,22 +26,27 @@ object DirectStateController {
     private var generation = 0L
     private var requestSequence = 0L
     private val main = Handler(Looper.getMainLooper())
-    @Volatile private var requestedState: Int? = null
+    @Volatile var requestedState: Int? = null
+        private set
     private var applicationPower: PowerManager? = null
     private var stateCallbackRegistered = false
     private var stateCallback: Any? = null
     val hasClosedRequest: Boolean get() = hasRequest && requestedState == 0
 
-    fun requestClosed(context: Context): Boolean = requestState(context, 0)
+    enum class Desired { CLOSED, OPENED, RELEASE }
 
     @Synchronized
-    fun applyDesired(context: Context, closed: Boolean): Boolean = when (
-        DirectPolicy.decide(closed, ShimState.directCurrentState, hasClosedRequest)
-    ) {
-        DirectPolicy.Command.NONE -> true
-        DirectPolicy.Command.CLOSED -> requestClosed(context)
-        DirectPolicy.Command.CANCEL -> cancel(context)
+    fun applyDesired(context: Context, desired: Desired, relock: Boolean = false): Boolean = when (desired) {
+        Desired.RELEASE -> cancel(context)
+        Desired.CLOSED -> if (hasRequest ||
+            (ShimState.directBaseState ?: ShimState.directUnrequestedState) == 0) true
+            else requestState(context, 0, relock)
+        Desired.OPENED -> if (hasRequest) true else requestState(context, 3, false)
     }
+
+    // Samsung firmware bit 2 preserves the override during sleep. Bit 1 is forbidden.
+    private const val REQUEST_FLAGS = 2
+    private var relockGeneration: Long? = null
 
     @Volatile var hasRequest = false
         private set
@@ -75,87 +80,75 @@ object DirectStateController {
     }
 
     /**
-     * Request CLOSED (0) while the requester is the top app.
+     * Request CLOSED (0) or OPENED (3) while the requester is the top app.
      * Returns true if the request was accepted, false otherwise.
      */
     @Synchronized
-    private fun requestState(context: Context, state: Int): Boolean {
+    private fun requestState(context: Context, state: Int, relock: Boolean): Boolean {
         ShimState.lastCallbackResult = "request failed"
         Timeline.event("requestState state=$state")
         return try {
             ensureInitialized(context)
             val manager = getManagerInstance(context)
             if (manager == null) {
-                Log.w(Config.TAG, "requestClosed: could not get DeviceStateManager instance")
-                false
+                error("DeviceStateManager instance unavailable")
             } else {
                 val request = buildRequest(state)
-                if (request == null) {
-                    Log.w(Config.TAG, "requestClosed: could not build DeviceStateRequest")
-                    false
-                } else {
-                    val previousGeneration = generation
-                    val previousState = requestedState
-                    val previousHasRequest = hasRequest
-                    val previousPending = ShimState.directConfirmationPending
-                    val previousUnrequestedState = ShimState.directUnrequestedState
-                    val requestGeneration = ++requestSequence
-                    generation = requestGeneration
-                    val callbackProxy = createCallbackProxy(requestGeneration, state)
-                    hasRequest = true
-                    ShimState.directUnrequestedState = null
-                    requestedState = state
-                    ShimState.directRequestGeneration = requestGeneration
-                    ShimState.directConfirmationPending = true
-                    main.postDelayed({
-                        synchronized(this@DirectStateController) {
-                            if (generation == requestGeneration) {
-                                ShimState.directConfirmationPending = false
-                                ShimState.changed()
-                            }
+                val previousGeneration = generation
+                val previousState = requestedState
+                val previousHasRequest = hasRequest
+                val previousPending = ShimState.directConfirmationPending
+                val previousUnrequestedState = ShimState.directUnrequestedState
+                val requestGeneration = ++requestSequence
+                generation = requestGeneration
+                val callbackProxy = createCallbackProxy(requestGeneration, state)
+                hasRequest = true
+                ShimState.directUnrequestedState = null
+                requestedState = state
+                ShimState.directRequestGeneration = requestGeneration
+                ShimState.directConfirmationPending = state == 0
+                if (relock) relockGeneration = requestGeneration
+                if (state == 0) main.postDelayed({
+                    synchronized(this@DirectStateController) {
+                        if (generation == requestGeneration) {
+                            ShimState.directConfirmationPending = false
+                            ShimState.changed()
                         }
-                    }, 5000L)
-                    ShimState.lastCallbackResult = "request accepted, waiting for activation"
-                    try {
-                        closedSentAt = SystemClock.elapsedRealtime()
-                        Timeline.event("requestState send state=$state generation=$requestGeneration flags=0")
-                        managerClassRef!!.getMethod(
-                            "requestState",
-                            requestClassRef!!,
-                            Executor::class.java,
-                            callbackInterfaceRef!!
-                        ).invoke(manager, request, callbackExecutor, callbackProxy)
-                    } catch (e: Exception) {
-                        ShimState.directConfirmationPending = previousPending
-                        ShimState.directUnrequestedState = previousUnrequestedState
-                        requestedState = previousState
-                        hasRequest = previousHasRequest
-                        generation = previousGeneration
-                        ShimState.directRequestGeneration = previousGeneration
-                        throw e
                     }
-                    Log.i(Config.TAG, "requestState: state=$state accepted (callback pending)")
-                    ShimState.changed()
-                    true
+                }, 5000L)
+                ShimState.lastCallbackResult = "request accepted, waiting for activation"
+                try {
+                    if (state == 0) closedSentAt = SystemClock.elapsedRealtime()
+                    Timeline.event("requestState send state=$state generation=$requestGeneration flags=$REQUEST_FLAGS")
+                    managerClassRef!!.getMethod(
+                        "requestState",
+                        requestClassRef!!,
+                        Executor::class.java,
+                        callbackInterfaceRef!!
+                    ).invoke(manager, request, callbackExecutor, callbackProxy)
+                } catch (e: Exception) {
+                    if (relockGeneration == requestGeneration) relockGeneration = null
+                    ShimState.directConfirmationPending = previousPending
+                    ShimState.directUnrequestedState = previousUnrequestedState
+                    requestedState = previousState
+                    hasRequest = previousHasRequest
+                    generation = previousGeneration
+                    ShimState.directRequestGeneration = previousGeneration
+                    throw e
                 }
+                Log.i(Config.TAG, "requestState: state=$state accepted (callback pending)")
+                ShimState.changed()
+                true
             }
-        } catch (e: SecurityException) {
-            Log.e(Config.TAG, "requestClosed: SecurityException (no CONTROL_DEVICE_STATE permission): ${e.message}")
-            ShimState.lastCallbackResult = "SecurityException: no CONTROL_DEVICE_STATE permission"
-            false
-        } catch (e: InvocationTargetException) {
-            val cause = e.cause
-            Log.e(Config.TAG, "requestClosed: InvocationTargetException: ${cause?.message}", cause)
-            ShimState.lastCallbackResult = cause?.message ?: "InvocationTargetException"
-            false
-        } catch (e: NoSuchMethodException) {
-            Log.e(Config.TAG, "requestClosed: method not found: ${e.message}")
-            initCause = "NoSuchMethodException: ${e.message}"
-            initialized = false
-            false
         } catch (e: Exception) {
-            Log.e(Config.TAG, "requestClosed: exception: ${e.javaClass.name}: ${e.message}", e)
-            ShimState.lastCallbackResult = e.message ?: e.javaClass.simpleName
+            val cause = if (e is InvocationTargetException) e.cause ?: e else e
+            val detail = "${cause.javaClass.simpleName}: ${cause.message.orEmpty()}"
+            Log.e(Config.TAG, "requestState failed: $detail", cause)
+            if (state == 3) {
+                Timeline.event("OPENED refused: $detail")
+                ShimState.lastCallbackResult = StateActivity.OPEN_UNAVAILABLE
+            } else ShimState.lastCallbackResult = detail
+            ShimState.changed()
             false
         }
     }
@@ -285,25 +278,13 @@ object DirectStateController {
         }
     }
 
-    private fun buildRequest(state: Int): Any? {
-        try {
-            // newBuilder is a static method on DeviceStateRequest, not on Builder
-            val newBuilder = requestClassRef!!.getMethod("newBuilder", Int::class.javaPrimitiveType)
-            val builder = newBuilder.invoke(null, state)
-
-            val setFlags = builderClassRef!!.getMethod("setFlags", Int::class.javaPrimitiveType)
-            // Samsung setBaseState dereferences null with flag 1 on OPENED. Never use flags 1 or 8.
-            setFlags.invoke(builder, 0)
-
-            val build = builderClassRef!!.getMethod("build")
-            return build.invoke(builder)
-        } catch (e: NoSuchMethodException) {
-            Log.w(Config.TAG, "Required method not found in DeviceStateRequest.Builder: ${e.message}")
-            return null
-        } catch (e: Exception) {
-            Log.e(Config.TAG, "Error building DeviceStateRequest: ${e.message}", e)
-            return null
-        }
+    private fun buildRequest(state: Int): Any {
+        // newBuilder is a static method on DeviceStateRequest, not on Builder.
+        val newBuilder = requestClassRef!!.getMethod("newBuilder", Int::class.javaPrimitiveType)
+        val builder = newBuilder.invoke(null, state)
+        val setFlags = builderClassRef!!.getMethod("setFlags", Int::class.javaPrimitiveType)
+        setFlags.invoke(builder, REQUEST_FLAGS)
+        return builderClassRef!!.getMethod("build").invoke(builder)
     }
 
     /**
@@ -333,6 +314,11 @@ object DirectStateController {
                         "onRequestActivated" -> {
                             ShimState.overrideClosed = state == 0
                             ShimState.lastCallbackResult = "activated"
+                            if (relockGeneration == requestGeneration) {
+                                relockGeneration = null
+                                Timeline.event(if (FoldConfirmAccessibilityService.lockScreen())
+                                    "relock after closed" else "lock unavailable")
+                            }
                         }
                         "onRequestSuspended" -> {
                             ShimState.overrideClosed = false
@@ -341,6 +327,7 @@ object DirectStateController {
                         "onRequestCanceled" -> {
                             onCanceled?.invoke(requestGeneration, SystemClock.elapsedRealtime(),
                                 applicationPower?.isInteractive == true)
+                            relockGeneration = null
                             requestedState = null
                             hasRequest = false
                             ShimState.overrideClosed = false
@@ -400,7 +387,7 @@ object DirectStateController {
                     "equals" -> return proxy === args?.getOrNull(0)
                     "toString" -> return proxy.javaClass.name
                 }
-                if (method.name == "onDeviceStateChanged" || method.name == "onStateChanged") {
+                if (method.name in listOf("onDeviceStateChanged", "onStateChanged", "onBaseStateChanged")) {
                     val state = args?.getOrNull(0)
                     val identifier = when (state) {
                         is Int -> state
@@ -408,10 +395,13 @@ object DirectStateController {
                         else -> state.javaClass.getMethod("getIdentifier").invoke(state) as Int
                     }
                     synchronized(this@DirectStateController) {
-                        ShimState.directCurrentState = identifier
-                        ShimState.directUnrequestedState = identifier.takeUnless { hasRequest }
+                        if (method.name == "onBaseStateChanged") ShimState.directBaseState = identifier
+                        else {
+                            ShimState.directCurrentState = identifier
+                            ShimState.directUnrequestedState = identifier.takeUnless { hasRequest }
+                        }
                     }
-                    Timeline.event("device state=$identifier")
+                    Timeline.event(if (method.name == "onBaseStateChanged") "base state=$identifier" else "device state=$identifier")
                     ShimState.changed()
                 }
                 return null

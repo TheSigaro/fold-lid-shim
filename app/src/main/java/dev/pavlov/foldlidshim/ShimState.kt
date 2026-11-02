@@ -21,6 +21,7 @@ object ShimState {
     fun removeStateListener(listener: (Int?) -> Unit) { stateListeners.remove(listener) }
     /** Current-state sample received while no direct request belonged to us. */
     @Volatile var directUnrequestedState: Int? = null
+    @Volatile var directBaseState: Int? = null
     @Volatile var directConfirmationPending = false
     @Volatile var directRequestGeneration = 0L
     @Volatile var hallDiagnosis = HallDiagnosis.Result.UNKNOWN

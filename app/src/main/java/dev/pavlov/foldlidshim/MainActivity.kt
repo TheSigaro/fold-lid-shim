@@ -301,10 +301,6 @@ class MainActivity : androidx.appcompat.app.AppCompatActivity() {
 
         // Show last callback/test result
         if (Prefs.restartBlocked(this)) parts.add(RestartGuard.MESSAGE)
-        if (ShimState.hallDiagnosis == HallDiagnosis.Result.STUCK_CLOSED ||
-                (DirectStateController.manualOpenGeneration > 0 && ShimState.directCurrentState == 0 &&
-                    !DirectStateController.hasClosedRequest))
-            parts.add(StateActivity.OPEN_UNAVAILABLE)
         val lastResult = ShimState.lastCallbackResult
         if (!lastResult.isNullOrEmpty()) {
             parts.add(lastResult)

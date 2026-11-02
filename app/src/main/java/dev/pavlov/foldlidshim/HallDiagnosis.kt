@@ -3,9 +3,9 @@ package dev.pavlov.foldlidshim
 /** Session history is based on base state, never on the overridden current state. */
 class HallDiagnosis(private val startedAtMs: Long = 0) {
     enum class Result(val label: String, val action: String) {
-        WORKING("работает", "Следуем Холлу, снимаем совпавший override"),
+        WORKING("работает", "Следуем Холлу, свой запрос снимаем при смене направления"),
         STUCK_OPEN("залип открыто", "Закрываем по углу, раскрытие возвращаем Холлу"),
-        STUCK_CLOSED("залип закрыто", "Угла нет - используйте кнопки или плитку Экран Fold"),
+        STUCK_CLOSED("залип закрыто", "При раскрытии пробуем OPENED после 700 мс"),
         UNKNOWN("пока неясно", "Наблюдаем угол и базовое состояние")
     }
     var maxAngle: Float? = null

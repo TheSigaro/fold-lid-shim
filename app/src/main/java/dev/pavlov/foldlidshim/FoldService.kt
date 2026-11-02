@@ -36,22 +36,25 @@ class FoldService : Service() {
     private var bounceRequestAt: Long? = null
     private val bounceTimeout = Runnable { evaluateDirect(); publish(force = true) }
     private lateinit var power: PowerManager
-    private var deferredLogged = false
+    private val overridePlanner = OverridePlanner()
+    private val openedTimeout = Runnable { evaluateDirect(); publish(force = true) }
     private val screenReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (stopping) return
             val now = SystemClock.elapsedRealtime()
             if (intent?.action == Intent.ACTION_SCREEN_OFF) {
                 sleepPolicy.screenOff(now)
-                if (pendingAction == StateActivity.ACTION_CLOSED) clearPendingAction()
             } else if (intent?.action == Intent.ACTION_SCREEN_ON) {
                 when (sleepPolicy.screenOn(now, magnetPreview.desiredClosed ?: motion.closed,
-                    DirectStateController.hasClosedRequest)) {
+                    DirectStateController.hasRequest)) {
                     SleepPolicy.Wake.LOCK -> {
                         Timeline.event("sleep cancel: spurious wake after ${now - (sleepPolicy.sleepCancelAt ?: now)} ms, lock")
                         if (!FoldConfirmAccessibilityService.lockScreen()) Timeline.event("lock unavailable")
                     }
-                    SleepPolicy.Wake.REQUEST_CLOSED -> Timeline.event("wake: request CLOSED")
+                    SleepPolicy.Wake.REQUEST_CLOSED -> {
+                        if ((ShimState.directBaseState ?: ShimState.directUnrequestedState) != 0)
+                            Timeline.event("wake: request CLOSED")
+                    }
                     SleepPolicy.Wake.NONE -> Unit
                 }
             }
@@ -184,8 +187,9 @@ class FoldService : Service() {
         val opening = stopAfterCancel || (!desiredClosed && angle >= open)
         // Abandon under the activity gate before reading ownership: an in-flight
         // binder call must either complete first or never execute.
-        if (opening && pendingAction == StateActivity.ACTION_CLOSED) clearPendingAction()
-        val owns = DirectStateController.hasClosedRequest
+        if ((opening && pendingAction == StateActivity.ACTION_CLOSED) ||
+            (desiredClosed && pendingAction == StateActivity.ACTION_OPENED)) clearPendingAction()
+        val owns = DirectStateController.hasRequest
         if (recoveryNeeded && ShimState.directCurrentState != null &&
             (owns || ShimState.directCurrentState != 0 || angle >= open)) {
             recoveryNeeded = false
@@ -195,14 +199,25 @@ class FoldService : Service() {
             recoveryPending = false
             if (pendingAction == StateActivity.ACTION_OPEN) clearPendingAction()
         }
-        val wakeOpen = sleepPolicy.desired(desiredClosed, power.isInteractive, owns)
-        if (wakeOpen && !stopAfterCancel && pendingAction == null) {
-            Timeline.event("wake on open")
+        sleepPolicy.desired(desiredClosed, power.isInteractive, owns)
+        val plan = overridePlanner.plan(desiredClosed,
+            ShimState.directBaseState ?: ShimState.directUnrequestedState,
+            DirectStateController.requestedState, power.isInteractive, now,
+            openZone = angle >= open, recoveryPending = recoveryPending || recoveryNeeded,
+            requestsAllowed = pendingAction == null && !stopAfterCancel,
+            openedZone = (realHingeAngle ?: lastAngle)?.let { it >= open } == true)
+        handler.removeCallbacks(openedTimeout)
+        overridePlanner.openedDeadline?.let {
+            handler.postDelayed(openedTimeout, (it - now).coerceAtLeast(1L))
+        }
+        if (plan.action == OverridePlanner.Action.WAKE && !stopAfterCancel && pendingAction == null) {
+            plan.log?.let { Timeline.event(it) }
             launchAction(StateActivity.ACTION_WAKE)
         }
         val needsCancel = owns || recoveryPending
         handler.removeCallbacks(retryCancel)
-        if (opening && needsCancel) {
+        if ((opening && recoveryPending) || (stopAfterCancel && owns) ||
+            plan.action == OverridePlanner.Action.CANCEL) {
             if (pendingAction == null && cancelRetry.due(SystemClock.elapsedRealtime(), true, true)) {
                 applyState(false)
             }
@@ -212,18 +227,21 @@ class FoldService : Service() {
         cancelRetry.due(SystemClock.elapsedRealtime(), false, false)
         if (stopAfterCancel && !needsCancel) { stopSelf(); return }
 
+        if (plan.action == OverridePlanner.Action.NONE) plan.log?.let { Timeline.event(it) }
         if (pendingAction != null || stopAfterCancel) return
-        if (ShimState.hallDiagnosis == HallDiagnosis.Result.STUCK_CLOSED) {
-            ShimState.lastCallbackResult = StateActivity.OPEN_UNAVAILABLE
-            return
+        when (plan.action) {
+            OverridePlanner.Action.REQUEST_CLOSED, OverridePlanner.Action.REQUEST_CLOSED_AND_RELOCK -> {
+                if (!motion.failedClosed && sleepPolicy.allowClosed()) {
+                    plan.log?.let { Timeline.event(it) }
+                    applyState(true, plan.action == OverridePlanner.Action.REQUEST_CLOSED_AND_RELOCK)
+                }
+            }
+            OverridePlanner.Action.REQUEST_OPENED -> {
+                plan.log?.let { Timeline.event(it) }
+                launchAction(StateActivity.ACTION_OPENED)
+            }
+            else -> Unit
         }
-        if (desiredClosed && !sleepPolicy.allowClosed(power.isInteractive)) {
-            if (!deferredLogged) Timeline.event("closed deferred: screen off")
-            deferredLogged = true
-            return
-        }
-        deferredLogged = false
-        if (desiredClosed && !motion.failedClosed) applyState(true)
     }
 
     private val pendingTimeout = Runnable {
@@ -232,7 +250,7 @@ class FoldService : Service() {
     private val stateListener = Runnable {
         handler.post {
             if (!stopping) {
-                if (!DirectStateController.hasRequest) hall.observe(ShimState.directUnrequestedState)
+                hall.observe(ShimState.directBaseState ?: ShimState.directUnrequestedState)
                 updateHallDiagnosis()
                 evaluateDirect()
 
@@ -262,8 +280,10 @@ class FoldService : Service() {
         handler = Handler(thread.looper)
         power = getSystemService(PowerManager::class.java)
         DirectStateController.onCanceled = { generation, at, interactive ->
+            val wasClosed = DirectStateController.hasClosedRequest
             handler.post {
-                if (!stopping && sleepPolicy.canceled(at, interactive)) {
+                if (!stopping && wasClosed &&
+                    sleepPolicy.canceled(at, interactive)) {
                     Timeline.event("sleep cancel generation=$generation")
                     if (pendingAction == StateActivity.ACTION_CLOSED) clearPendingAction()
                 }
@@ -459,6 +479,13 @@ class FoldService : Service() {
             evaluateDirect()
             return
         }
+        if (action == StateActivity.ACTION_OPENED) {
+            Timeline.event("activity result OPENED success=$success error=$error")
+            if (!success) ShimState.lastCallbackResult = StateActivity.OPEN_UNAVAILABLE
+            publish(force = true)
+            evaluateDirect()
+            return
+        }
         val closed = action == StateActivity.ACTION_CLOSED
         // A request can have executed just before its activity result times out.
         // hasRequest means accepted (possibly suspended), and still needs cancellation.
@@ -482,18 +509,13 @@ class FoldService : Service() {
         evaluateDirect()
     }
 
-    private fun applyState(closed: Boolean): Boolean {
+    private fun applyState(closed: Boolean, relock: Boolean = false): Boolean {
         if (pendingAction != null) return false
-        if (DirectPolicy.decide(closed, ShimState.directCurrentState,
-                DirectStateController.hasClosedRequest) == DirectPolicy.Command.NONE &&
-            !(!closed && recoveryPending)) {
-            return true
-        }
         Timeline.event("decision ${if (closed) "CLOSED" else "CANCEL"}")
-        return launchAction(if (closed) StateActivity.ACTION_CLOSED else StateActivity.ACTION_OPEN)
+        return launchAction(if (closed) StateActivity.ACTION_CLOSED else StateActivity.ACTION_OPEN, relock)
     }
 
-    private fun launchAction(action: String): Boolean {
+    private fun launchAction(action: String, relock: Boolean = false): Boolean {
         if (pendingAction != null) return false
         val id = UUID.randomUUID().toString()
         pendingAction = action
@@ -515,6 +537,7 @@ class FoldService : Service() {
             Timeline.event("startActivity action=$pendingAction id=$id")
             startActivity(Intent(this, StateActivity::class.java).apply {
                 putExtra(StateActivity.EXTRA_ACTION, pendingAction)
+                putExtra(StateActivity.EXTRA_RELOCK, relock)
                 putExtra(StateActivity.EXTRA_ID, id)
                 putExtra(StateActivity.EXTRA_RECEIVER, receiver)
                 putExtra(StateActivity.EXTRA_DEADLINE, SystemClock.elapsedRealtime() + DIRECT_TIMEOUT_MS)

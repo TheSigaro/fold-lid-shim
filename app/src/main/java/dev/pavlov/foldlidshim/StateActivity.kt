@@ -2,9 +2,9 @@ package dev.pavlov.foldlidshim
 
 import android.app.Activity
 import android.content.res.Configuration
-import android.os.PowerManager
 import android.content.Intent
 import android.os.Bundle
+import android.os.PowerManager
 import android.os.Handler
 import android.os.ResultReceiver
 import android.os.SystemClock
@@ -58,9 +58,11 @@ class StateActivity : Activity() {
         const val EXTRA_ACTION = "action"
         const val ACTION_CLOSED = "closed"
         const val ACTION_OPEN = "open"
+        const val ACTION_OPENED = "opened"
+        const val EXTRA_RELOCK = "relock"
         const val ACTION_WAKE = "wake"
         private const val FOCUS_TIMEOUT_MS = 3000L
-        const val OPEN_UNAVAILABLE = "Система не даёт приложению запросить открытие. При залипании «закрыто» нужен adb с компьютера"
+        const val OPEN_UNAVAILABLE = "Система отклонила запрос OPENED. Повтор после смены направления; для открытия доступен adb с компьютера"
     }
 
     private val handler = Handler(Looper.getMainLooper())
@@ -76,6 +78,8 @@ class StateActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (!getSystemService(PowerManager::class.java).isInteractive)
+            intent.putExtra(EXTRA_RELOCK, true)
         setShowWhenLocked(true)
         setTurnScreenOn(true)
         ShimState.addListener(stateChanged)
@@ -92,6 +96,8 @@ class StateActivity : Activity() {
         report(false, "activity replaced by a new action")
         handler.removeCallbacksAndMessages(null)
         super.onNewIntent(intent)
+        if (!getSystemService(PowerManager::class.java).isInteractive)
+            intent.putExtra(EXTRA_RELOCK, true)
         setIntent(intent)
         receiver = intent.getParcelableExtra(EXTRA_RECEIVER, ResultReceiver::class.java)
         reported = false
@@ -140,15 +146,14 @@ class StateActivity : Activity() {
                 } else {
                     activeId = null
                     success = when (action) {
-                        ACTION_CLOSED -> if (getSystemService(PowerManager::class.java).isInteractive)
-                            DirectStateController.applyDesired(this, true) else {
-                            Timeline.event("closed deferred: screen off")
-                            true
-                        }
+                        ACTION_CLOSED -> DirectStateController.applyDesired(this,
+                            DirectStateController.Desired.CLOSED, intent.getBooleanExtra(EXTRA_RELOCK, false))
+                        ACTION_OPENED -> DirectStateController.applyDesired(this,
+                            DirectStateController.Desired.OPENED)
                         ACTION_WAKE -> true
                         ACTION_OPEN -> {
                             if (receiver == null) DirectStateController.manualOpen()
-                            DirectStateController.cancel(this)
+                            DirectStateController.applyDesired(this, DirectStateController.Desired.RELEASE)
                         }
                         else -> false
                     }
@@ -162,10 +167,6 @@ class StateActivity : Activity() {
         accepted = success
         actionError = error
         if (error != null) Timeline.event("request exception $error")
-        if (action == ACTION_OPEN && ShimState.directCurrentState == 0) {
-            ShimState.lastCallbackResult = OPEN_UNAVAILABLE
-            ShimState.changed()
-        }
         // Result is sent by onDestroy, after relinquishing this foreground window.
         // Keep the foreground context for confirmation; callback ends it without polling.
         if (!success || !ShimState.directConfirmationPending) finishAndRemoveTask()

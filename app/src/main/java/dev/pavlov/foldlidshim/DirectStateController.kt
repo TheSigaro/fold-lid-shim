@@ -327,13 +327,14 @@ object DirectStateController {
                             ShimState.lastCallbackResult = "suspended"
                         }
                         "onRequestCanceled" -> {
-                            if (!activated) {
-                                // The request never applied, so the committed state is still the
-                                // system's own and no further callback follows the cancellation.
-                                ShimState.directUnrequestedState = ShimState.directCurrentState
-                                Timeline.event("request canceled before activation, " +
-                                    "system state=${ShimState.directCurrentState}")
-                            }
+                            // Until the next state callback the committed state is the last one
+                            // reported: the system's own when the request never applied, and the
+                            // override's state when the base now equals it (then no callback
+                            // follows at all). A differing base is reported within milliseconds.
+                            ShimState.directUnrequestedState = ShimState.directCurrentState
+                            Timeline.event("request canceled " +
+                                (if (activated) "after" else "before") + " activation, " +
+                                "system state=${ShimState.directCurrentState}")
                             onCanceled?.invoke(requestGeneration, SystemClock.elapsedRealtime(),
                                 applicationPower?.isInteractive == true)
                             relockGeneration = null

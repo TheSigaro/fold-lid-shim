@@ -30,7 +30,7 @@ class MagnetFoldDetectorTest {
     @Test fun reboundAfterOpeningCannotCloseBeforeHinge180() {
         val c = Capture(); val d = MagnetFoldDetector(listener = c)
         d.onHinge(0, 180f); d.onHinge(1, 90f); d.onHinge(2, 0f)
-        for (ms in 1000L..1300 step 10) feed(d, ms, 100.0)
+        for (ms in 800L..1300 step 10) feed(d, ms, 100.0)
         for (ms in 1310L..1500 step 10) feed(d, ms, 40.0)
         assertEquals(listOf(1_310_000_000L), c.opening)
         d.onHinge(1_400_000_000, 90f)
@@ -177,7 +177,7 @@ class MagnetFoldDetectorTest {
                     d.onHinge(0, 180f)
                     d.onHinge(1, 90f)
                 }
-                for (ms in 1000L..1300 step 10) vector(d, ms, if (opening) 100.0 else 40.0)
+                for (ms in 800L..1300 step 10) vector(d, ms, if (opening) 100.0 else 40.0)
                 for (ms in 1310L..1500 step 10)
                     vector(d, ms, 70.0, 30.0 * ratio)
                 assertEquals("opening=$opening ratio=$ratio", if (ratio < 0.65) 1 else 0,
@@ -196,7 +196,7 @@ class MagnetFoldDetectorTest {
         assertTrue(c.opening.isEmpty())
         for (ms in 30000L..30500 step 10) vector(d, ms, if (ms < 30300) 100.0 else 40.0)
         assertTrue(c.opening.isEmpty())
-        for (ms in 32000L..32400 step 10) vector(d, ms, if (ms < 32200) 100.0 else 40.0)
+        for (ms in 31700L..32400 step 10) vector(d, ms, if (ms < 32200) 100.0 else 40.0)
         assertEquals(listOf(32_200_000_000L), c.opening)
     }
 
@@ -209,7 +209,7 @@ class MagnetFoldDetectorTest {
                 d.onHinge(1, 90f)
             }
             fun jump(start: Long) {
-                for (ms in start..start+400 step 10)
+                for (ms in start-300..start+400 step 10)
                     vector(d, ms, if ((ms < start+200) == opening) 100.0 else 40.0)
             }
             jump(1000)
@@ -230,7 +230,7 @@ class MagnetFoldDetectorTest {
         d.onGyro(31_000_000_000L, 0.0, 0.0, 0.0)
         d.onHinge(0, 0f)
         d.onHinge(1, 180f) // Not the first hinge any more, now stale.
-        for (ms in 32000L..32400 step 10) vector(d, ms, if (ms < 32200) 100.0 else 40.0)
+        for (ms in 31700L..32400 step 10) vector(d, ms, if (ms < 32200) 100.0 else 40.0)
         assertEquals(listOf(32_200_000_000L), c.opening)
     }
 
@@ -242,6 +242,112 @@ class MagnetFoldDetectorTest {
             assertNull(p.expire(10_000_000_000L + timeout - 1))
             assertNotNull(p.expire(10_000_000_000L + timeout))
             assertEquals(10_000_000_000L + timeout + 30_000_000_000L, p.blockedUntilNs)
+        }
+    }
+
+    @Test fun phantomClosingBlocksFastRemovalButAllowsOpeningAfterOneSecond() {
+        for (delay in listOf(100L, 1000L)) {
+            for (across in listOf(0.0, 18.0)) {
+                val c = Capture()
+                val d = MagnetFoldDetector(listener = c)
+                d.onHinge(0, 0f)
+                for (ms in 1400L..(2200 + delay) step 10) {
+                    vector(d, ms, when {
+                        ms < 2000 -> 40.0
+                        ms < 2000 + delay -> 65.0
+                        else -> 35.0
+                    }, if (ms in 2000L until (2000 + delay)) across else 0.0)
+                }
+                // The last positive window ends at 2140 ms, so quarantine ends at 2640 ms.
+                assertEquals(if (delay == 100L) emptyList<Long>() else listOf(3_000_000_000L), c.opening)
+            }
+        }
+    }
+
+    @Test fun closingSettlingBeforeOpeningHoldIsNotPhantom() {
+        val c = Capture()
+        val d = MagnetFoldDetector(listener = c)
+        d.onHinge(0, 0f)
+        for (ms in 0L..1000 step 10)
+            vector(d, ms, when {
+                ms < 300 -> 40.0
+                ms < 800 -> 65.0
+                else -> 35.0
+            })
+        assertEquals(listOf(800_000_000L), c.opening)
+    }
+
+    @Test fun openingRejectsOnlyRiseBeforeWindow() {
+        for (rise in listOf(15.0, 0.0, -15.0)) {
+            val c = Capture()
+            val d = MagnetFoldDetector(listener = c)
+            d.onHinge(0, 0f)
+            for (ms in 1000L..1800 step 10) {
+                val along = when {
+                    ms < 1500 -> 60.0
+                    ms < 1650 -> 60.0 + rise
+                    else -> 35.0 + rise
+                }
+                vector(d, ms, along)
+            }
+            assertEquals("pre-window rise=$rise", if (rise > 10) emptyList<Long>()
+                else listOf(1_650_000_000L), c.opening)
+        }
+    }
+
+    @Test fun phantomDuringQuarantineExtendsItEvenWhenPreviewIsBlocked() {
+        val c = Capture()
+        val d = MagnetFoldDetector(listener = c)
+        d.onHinge(0, 0f)
+        d.inhibitUntil(2_100_000_000L)
+        for (ms in 1400L..4000 step 10) {
+            val along = when {
+                ms < 2000 -> 40.0
+                ms < 2100 -> 65.0
+                ms < 2400 -> 35.0
+                ms < 2800 -> 60.0
+                ms < 2900 -> 30.0
+                ms < 3400 -> 30.0 + (ms - 2900) * 0.06
+                ms < 3800 -> 60.0
+                else -> 30.0
+            }
+            vector(d, ms, along)
+            // The second peak extends quarantine from 2590 to 3040 ms.
+            if (ms < 3800) assertTrue("Early opening at $ms", c.opening.isEmpty())
+        }
+        assertEquals(listOf(3_800_000_000L), c.opening)
+    }
+
+    @Test fun quietPhoneNeedsLargerOpeningButMissingOrMovingGyroUsesNormalThreshold() {
+        for ((speed, drop, expected) in listOf(
+            Triple(0.1, 25.0, false), Triple(0.1, 40.0, true),
+            Triple(1.0, 25.0, true), Triple(null, 25.0, true)
+        )) {
+            val c = Capture()
+            val d = MagnetFoldDetector(listener = c)
+            d.onHinge(0, 0f)
+            for (ms in 1000L..1700 step 10) {
+                // Rotation along M leaves this synthetic field unchanged.
+                if (speed != null) {
+                    val omega = d.params.direction * speed
+                    d.onGyro(ms * 1_000_000, omega.x, omega.y, omega.z)
+                }
+                vector(d, ms, if (ms < 1500) 60.0 else 60.0 - drop)
+            }
+            assertEquals("speed=$speed drop=$drop", if (expected) listOf(1_500_000_000L)
+                else emptyList<Long>(), c.opening)
+        }
+    }
+
+    @Test fun openingRequiresFullPreWindowHistoryAfterStartAndGap() {
+        for (start in listOf(1000L, 2000L)) {
+            val c = Capture()
+            val d = MagnetFoldDetector(listener = c)
+            d.onHinge(0, 0f)
+            if (start == 2000L) for (ms in 1000L..1500 step 10) vector(d, ms, 60.0)
+            for (ms in start..start + 400 step 10)
+                vector(d, ms, if (ms < start + 200) 60.0 else 35.0)
+            assertTrue(c.opening.isEmpty())
         }
     }
 

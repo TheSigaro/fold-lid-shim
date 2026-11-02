@@ -15,6 +15,11 @@ data class MagnetVector(val x: Double, val y: Double, val z: Double) {
 
 data class MagnetParams(
     val windowNs: Long = 150_000_000L,
+    val preWindowNs: Long = 300_000_000L,
+    val preRiseTolerance: Double = 10.0,
+    val phantomHoldNs: Long = 500_000_000L,
+    val quietGyro: Double = 0.5,
+    val quietOpenThreshold: Double = 35.0,
     val closeThreshold: Double = 20.0,
     val openThreshold: Double = 18.0,
     val maxPerpendicularRatio: Double = 0.65,
@@ -70,8 +75,12 @@ class MagnetFoldDetector(
 
     init {
         require(params.windowNs > 0 && params.gapNs > 0 && params.staleNs >= params.gapNs)
+        require(params.preWindowNs > 0 && params.phantomHoldNs >= 0)
+        require(params.preRiseTolerance.isFinite() && params.preRiseTolerance >= 0)
         require(params.closeThreshold.isFinite() && params.closeThreshold > 0)
         require(params.openThreshold.isFinite() && params.openThreshold > 0)
+        require(params.quietGyro.isFinite() && params.quietGyro > 0)
+        require(params.quietOpenThreshold.isFinite() && params.quietOpenThreshold > 0)
         require(params.maxPerpendicularRatio.isFinite() && params.maxPerpendicularRatio > 0)
         require(params.earthRadius.isFinite() && params.earthRadius > 0)
         require(params.magnetStrength.isFinite() && params.magnetStrength > 0)
@@ -114,7 +123,7 @@ class MagnetFoldDetector(
         val v = MagnetVector(wx, wy, wz)
         if (!v.finite() || !fresh(tNs) || (gyro.lastOrNull()?.t ?: Long.MIN_VALUE) >= tNs) return
         gyro.addLast(Sample(tNs, v))
-        val retention = maxOf(500_000_000L, params.windowNs + params.gapNs)
+        val retention = maxOf(500_000_000L, params.windowNs + params.preWindowNs + params.gapNs)
         while (gyro.isNotEmpty() && gyro.first().t < tNs - retention) gyro.removeFirst()
     }
 
@@ -132,13 +141,23 @@ class MagnetFoldDetector(
         if (hinge == 180f && tNs >= disturbedUntil) collectCalibration(tNs, b)
         mag.addLast(Sample(tNs, b))
         val target = tNs - params.windowNs
-        // Retain about 300 ms, including an anchor at or before t-W. No look-ahead.
-        val oldest = tNs - maxOf(300_000_000L, params.windowNs)
+        // Keep both anchors and enough history for a sample just before each target.
+        val oldest = tNs - (params.windowNs + params.preWindowNs + params.gapNs)
         while (mag.size > 1 && mag.elementAt(1).t <= oldest) mag.removeFirst()
         val anchor = mag.lastOrNull { it.t <= target } ?: return
         val earth = rotate(anchor.v - hardIron, anchor.t, tNs)
         val delta = (b - hardIron) - earth
         lastScore = delta.dot(direction)
+        val openingReady = hinge == 0f && closedAt?.let { tNs - it >= params.openingHoldNs } == true
+        val older = mag.lastOrNull { it.t <= anchor.t - params.preWindowNs }
+        val preRise = older?.let {
+            ((anchor.v - hardIron) - rotate(it.v - hardIron, it.t, anchor.t)).dot(direction)
+        }
+        // A positive impulse on a closed phone can be followed by a false opening.
+        // Extend quarantine even while blocked; direction filtering does not apply to phantoms.
+        if (openingReady && !didOpen && lastScore >= params.closeThreshold) {
+            disturbedUntil = maxOf(disturbedUntil, tNs + params.phantomHoldNs)
+        }
         if (tNs < blockedUntil || tNs < disturbedUntil) return
         if ((delta - direction * lastScore).norm() > params.maxPerpendicularRatio * abs(lastScore)) return
         if (lastScore >= params.closeThreshold && hinge != null && hinge!! <= 90f &&
@@ -149,8 +168,13 @@ class MagnetFoldDetector(
             openedSinceClosed = false
             closedAt = tNs
             listener.closing(tNs, lastScore)
-        } else if (lastScore <= -params.openThreshold && hinge == 0f &&
-            closedAt?.let { tNs - it >= params.openingHoldNs } == true && !didOpen) {
+        } else if (lastScore <= -params.openThreshold && openingReady && !didOpen) {
+            if (preRise == null || preRise > params.preRiseTolerance) return
+            // Translation through a foreign field can imitate a small opening without rotation.
+            val maxGyro = gyro.filter { it.t in target..tNs }.maxOfOrNull { it.v.norm() }
+            val threshold = if (maxGyro != null && maxGyro < params.quietGyro)
+                params.quietOpenThreshold else params.openThreshold
+            if (lastScore > -threshold) return
             didOpen = true
             didClose = false
             listener.opening(tNs, lastScore)

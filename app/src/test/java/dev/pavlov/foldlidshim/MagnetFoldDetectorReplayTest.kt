@@ -110,4 +110,44 @@ class MagnetFoldDetectorReplayTest {
         }
     }
 
+    @Test fun laptopMovementDoesNotOpenClosedPhone() {
+        for (threshold in listOf(18.0, 20.0, 22.0)) {
+            val events = mutableListOf<Event>()
+            val d = MagnetFoldDetector(MagnetParams(closeThreshold = threshold, openThreshold = threshold),
+                object : MagnetFoldDetector.Listener {
+                    override fun closing(tNs: Long, score: Double) { events += Event(true, tNs, score) }
+                    override fun opening(tNs: Long, score: Double) { events += Event(false, tNs, score) }
+                })
+            val rows = javaClass.getResourceAsStream("/sensors-3-trim.csv")!!.bufferedReader().use { it.readLines() }
+                .map { it.split(';') }
+            val origin = rows.first { it[2] == "header" }[0].toLong()
+            val hinges = mutableListOf<Pair<Float, Long>>()
+            for (r in rows) {
+                val t = r[1].toLong()
+                when (r[2]) {
+                    "36" -> { d.onHinge(t, r[4].toFloat()); hinges += r[4].toFloat() to t }
+                    "4" -> d.onGyro(t, r[4].toDouble(), r[5].toDouble(), r[6].toDouble())
+                    "14" -> d.onMag(t, r[4].toDouble(), r[5].toDouble(), r[6].toDouble())
+                }
+            }
+            assertTrue("Laptop false event at T=$threshold: $events", events.none {
+                (it.t - origin) * 1e-9 in 20.0..35.0
+            })
+            assertEquals("Exactly one closing and one opening at T=$threshold", 2, events.size)
+            assertEquals(listOf(true, false), events.map { it.closed })
+            assertEquals(6.16, (events[0].t - origin) * 1e-9, 0.08)
+            assertEquals(86.52, (events[1].t - origin) * 1e-9, 0.08)
+            val baseline = when (threshold) {
+                18.0 -> listOf(195.985, 425.987)
+                20.0 -> listOf(175.985, 395.987)
+                else -> listOf(155.985, 395.987)
+            }
+            for ((i, event) in events.withIndex()) {
+                val hinge = hinges.first { (a, t) -> t > event.t && a == if (event.closed) 0f else 90f }.second
+                assertTrue("Lead degraded at T=$threshold: $event",
+                    (hinge - event.t) / 1e6 >= baseline[i] - 30.0)
+            }
+        }
+    }
+
 }
